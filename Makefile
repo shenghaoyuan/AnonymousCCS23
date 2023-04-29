@@ -35,31 +35,7 @@ COQDEP="$(COQBIN)coqdep" -exclude-dir aarch64 -exclude-dir x86_64 -exclude-dir r
 
 #COQC="$(COQBIN)coqc" -q $(COQINCLUDES) $(COQCOPTS)
 
-simple:
-	@echo $@
-	@$(MAKE) comm
-	@$(MAKE) dxcomm
-	@$(MAKE) model
-	@$(MAKE) verifier
-	@$(MAKE) monadicmodel
-	@$(MAKE) concretemodel
-	@$(MAKE) compile
-	@$(MAKE) jit-verifier
-	@$(MAKE) jit
-	@$(MAKE) jit-simulation
-	@$(MAKE) jit-verification
-
 proof: $(FILES:.v=.vo)
-
-#%.vo: %.v
-#	@rm -f html/glob/$(*F).glob
-#	@echo "MY COQC $*.v"
-#	@$(COQC) -dump-glob html/glob/$(*F).glob $*.v
-
-armtest:
-	@echo $@
-	cd clight && $(ARMCC) -c -O0 -mcpu=cortex-m4 -march=armv7e-m -mthumb armtest.c
-	cd clight && rm -f armbin.txt && $(ARMDUMP) -D armtest.o >> armbin.txt
 
 
 all:
@@ -428,4 +404,4 @@ clean :
 # We want to keep the .cmi that were built as we go
 .SECONDARY:
 
-.PHONY: simple all test comm dxcomm verifier dxverifier model monadicmodel isolation equivalence compcertinfo compile extract clightmodel clightlogic simulation jit jit-clight jit-verifier jit-simulation example clean armtest addheadache
+.PHONY: all test comm dxcomm verifier dxverifier model monadicmodel isolation equivalence compcertinfo compile extract clightmodel clightlogic simulation jit jit-clight jit-verifier jit-simulation example clean addheadache
