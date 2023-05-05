@@ -41,13 +41,13 @@ You need two shells:
 
 - One for observing the output;
 ```shell
-/home/shyuan/GitHub/RIOT/dist/tools/pyterm/pyterm -p "/dev/ttyACM0" -b "115200"
+../RIOT/dist/tools/pyterm/pyterm -p "/dev/ttyACM0" -b "115200"
 ```
 
 - Another for compiling/debugging RIOT-OS + target program
 
 ```shell
-BOARD=nrf52840dk make -C tests/bench_exec_array WERROR=0 flash debug # debug could be removed
+BOARD=nrf52840dk make -C tests/bench_.. WERROR=0 flash debug # debug could be removed
 ```
 
 # How to build your benchmarks using rBPF-JIT

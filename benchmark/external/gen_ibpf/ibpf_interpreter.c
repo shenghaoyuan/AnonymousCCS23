@@ -294,8 +294,8 @@ void print_thumb(struct jit_state* st){
 
 void print_ibpf(struct jit_state* st){
   printf("ibpf list: ");
-  for(unsigned i = 0; i < (*st).ins_len; i++) {
-    print_bpf_insstruction((*st).jit_ins[i]);
+  for(unsigned i = 0; i < (*st).ins_len; i++) { //printf("%d\n", (*st).jit_ins);  printf("%d\n", (*st).jit_ins + i);  printf("%lld\n", *((*st).jit_ins + i));
+    print_bpf_insstruction(*((*st).jit_ins + i));
     printf("(%d)\n", i);
   }
   printf("\n");
@@ -398,6 +398,7 @@ static __attribute__((always_inline)) inline unsigned int eval_ins_len(struct ji
 
 static __attribute__((always_inline)) inline unsigned long long eval_ins(struct jit_state* st, unsigned int idx)
 { //print_jit_state(st);
+  //if (idx >= (*st).ins_len) 
   return *((*st).jit_ins + idx);
 }
 

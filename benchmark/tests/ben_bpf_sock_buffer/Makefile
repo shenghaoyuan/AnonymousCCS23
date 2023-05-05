@@ -1,8 +1,6 @@
 include ../Makefile.tests_common
 
 USEMODULE += embunit
-USEMODULE += bpf
-USEMODULE += test_utils_interactive_sync
 
 USEMODULE += ztimer_usec
 USEMODULE += saul
@@ -10,20 +8,30 @@ USEMODULE += saul_reg
 USEMODULE += saul_default
 USEMODULE += printf_float
 
-BPF_COQ ?= 1
-CSV ?= 1
 
-ifeq (1,$(BPF_COQ))
+# 1 for certrBPF, 2 for iBPF
+BPF_COQ ?= 2
+
+
+ifneq (0,$(BPF_COQ))
 EXTERNAL_MODULE_DIRS += external
+ifeq (1,$(BPF_COQ))
 USEMODULE += gen_bpf
+else
+USEMODULE += gen_ibpf
+endif
 else
 USEMODULE += bpf
 endif
 
-NUM_INSTRUCTIONS ?= 2000
+NUM_INSTRUCTIONS ?= 4000
 BPF_BRANCHES_ALLOWED = $(NUM_INSTRUCTIONS)
 
+#JITTED_LIST_MAX_LENGTH ?= 16000
+#ENTRY_POINT_MAX_LENGTH ?= 5000
+
 CFLAGS += -I$(CURDIR) -DNUM_INSTRUCTIONS=$(NUM_INSTRUCTIONS) -DBPF_COQ=$(BPF_COQ) -DCONFIG_BPF_BRANCHES_ALLOWED=$(BPF_BRANCHES_ALLOWED)
-CFLAGS += -DCSV_OUT=$(CSV)
+#CFLAGS += -DJITTED_LIST_MAX_LENGTH=$(JITTED_LIST_MAX_LENGTH) -DENTRY_POINT_MAX_LENGTH=$(ENTRY_POINT_MAX_LENGTH)
+CFLAGS += -Wno-cast-align
 
 include $(RIOTBASE)/Makefile.include

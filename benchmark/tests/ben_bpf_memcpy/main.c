@@ -15,7 +15,7 @@
 #endif
 
 
-unsigned char memcpy_compcert_bpf_bin[] = { //CompCert
+unsigned char memcpy_compcert_bpf_bin[] = {
   0xbc, 0xa0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x14, 0x0a, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
   0x63, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -35,33 +35,14 @@ unsigned char memcpy_compcert_bpf_bin[] = { //CompCert
   0x04, 0x0a, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
   0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
-/* LLVM
-{
-  0xbc, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x67, 0x04, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
-  0x77, 0x04, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
-  0x15, 0x04, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x67, 0x03, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
-  0x77, 0x03, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
-  0x71, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x73, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x07, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-  0x07, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-  0x07, 0x03, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
-  0x15, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x05, 0x00, 0xf9, 0xff, 0x00, 0x00, 0x00, 0x00,
-  0xb4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-};
-*/
 
 unsigned char src_data[] =
         "AD3Awn4kb6FtcsyE0RU25U7f55Yncn3LP3oEx9Gl4qr7iDW7I8L6Pbw9jNnh0sE4DmCKuc"
         "d1J8I34vn31W924y5GMS74vUrZQc08805aj4Tf66HgL1cO94os10V2s2GDQ825yNh9Yuq3"
-        "QHcA60xl31rdA7WskVtCXI7ruH1A4qaR6Uk454hm401lLmv2cGWt5KTJmr93d3JsGaRRPs"
+        /*"QHcA60xl31rdA7WskVtCXI7ruH1A4qaR6Uk454hm401lLmv2cGWt5KTJmr93d3JsGaRRPs"
         "4HqYi4mFGowo8fWv48IcA3N89Z99nf0A0H2R6P0uI4Tir682Of3Rk78DUB2dIGQRRpdqVT"
         "tLhgfET2gUGU65V3edSwADMqRttI9JPVz8JS37g5QZj4Ax56rU1u0m0K8YUs57UYG5645n"
-        "byNy4yqxu7";
+        "byNy4yqxu7"*/;
 
 unsigned char dst_data[520];
         
@@ -109,12 +90,14 @@ static struct memory_region mr_src = {.start_addr = (uintptr_t)src_data,
 
 
 int main(void){  
+  float duration = 0;
+  for (int loop_size = 0; loop_size < 1000; loop_size++) {
 
 #ifdef MODULE_GEN_BPF
   struct memory_region memory_regions[] = { mr_stack, mr_src, mr_dst };
   struct bpf_state st = {
     .state_pc = 0,
-    .regsmap = {0LLU, (intptr_t)src_data, (intptr_t)dst_data, (sizeof(src_data)/sizeof(src_data[0])), 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, (uintptr_t)_bpf_stack+512},
+    .regsmap = {0LLU, (intptr_t)src_data, (intptr_t)dst_data, 1LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, (uintptr_t)_bpf_stack+512},
     .bpf_flag = vBPF_OK,
     .mrs = memory_regions,
     .mrs_num = ARRAY_SIZE(memory_regions),
@@ -127,7 +110,7 @@ int main(void){
   ibpf_set_mem_region_one(&ibpf_state, src_data, sizeof(src_data), Readable);
   ibpf_set_mem_region_two(&ibpf_state, dst_data, sizeof(dst_data), Writable);
   ibpf_set_code(&ibpf_state, memcpy_compcert_bpf_bin, sizeof(memcpy_compcert_bpf_bin));
-  ibpf_set_input(&ibpf_state, (intptr_t)src_data, (intptr_t)dst_data, (sizeof(src_data)/sizeof(src_data[0])), 0LLU, 0LLU);
+  ibpf_set_input(&ibpf_state, (intptr_t)src_data, (intptr_t)dst_data, 1LLU, 0LLU, 0LLU);
   jit_alu32(&ibpf_state.st);
 #else
   bpf_t bpf = {
@@ -158,8 +141,8 @@ int main(void){
   printf("Vanilla-rBPF C result = 0x:%x\n", (unsigned int)result);
 #endif
   uint32_t end = ztimer_now(ZTIMER_USEC);
-  float duration = (float)(end-begin);
-  
+  duration = (float)(end-begin) + duration;
+  }
   printf("execution time:%f\n", duration);
   
   printf("%s\n", dst_data);

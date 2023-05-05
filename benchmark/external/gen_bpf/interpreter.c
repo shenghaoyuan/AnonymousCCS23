@@ -574,6 +574,8 @@ static __attribute__((always_inline)) inline unsigned char *check_mem_aux2(struc
         && mr_perm >= perm) {
     return (*mr).block_ptr + lo_ofs;
   } else {
+    /*printf("no-check_mem_aux2, addr=%d, start=%d, hi_ofs=%d, size=%d, lo_ofs=%d, chunk=%d, mr_perm=%d, perm=%d\n",
+      addr, start, hi_ofs, size, lo_ofs, chunk, mr_perm, perm); */
     return 0;
   }
 }
@@ -585,7 +587,7 @@ static __attribute__((always_inline)) inline unsigned char *check_mem_aux(struct
   unsigned char *check_mem;
   _Bool is_null;
   if (num == 0U) {
-    return 0;
+    return 0; //printf("no-check_mem_aux num=0");
   } else {
     n = num - 1U;
     cur_mr = get_mem_region(n, mrs);
@@ -1180,7 +1182,7 @@ static __attribute__((always_inline)) inline void bpf_interpreter_aux(struct bpf
   unsigned int f;
   unsigned int len0;
   unsigned int pc0;
-  if (fuel == 0U) { printf("no fuel\n");
+  if (fuel == 0U) { //printf("no fuel\n");
     upd_flag(st, 6U);
     return;
   } else {
@@ -1197,14 +1199,14 @@ static __attribute__((always_inline)) inline void bpf_interpreter_aux(struct bpf
           upd_pc_incr(st);
           bpf_interpreter_aux(st, fuel0);
           return;
-        } else { printf("out of len0\n");
+        } else { //printf("out of len0\n");
           upd_flag(st, 6U);
           return;
         }
       } else {
         return;
       }
-    } else { printf("out of len1\n");
+    } else { //printf("out of len1\n");
       upd_flag(st, 6U);
       return;
     }

@@ -55,6 +55,8 @@ static struct memory_region mr_stack = {.start_addr = (uintptr_t)_bpf_stack,
 
 
 int main(void){  
+  float duration = 0;
+  for (int loop_size = 0; loop_size < 1000; loop_size++) {
 
 #ifdef MODULE_GEN_BPF
   struct memory_region memory_regions[] = { mr_stack };
@@ -104,8 +106,8 @@ int main(void){
   //printf("Vanilla-rBPF C result = 0x:%x\n", (unsigned int)result);
 #endif
   uint32_t end = ztimer_now(ZTIMER_USEC);
-  float duration = (float)(end-begin);
-  
+  duration = (float)(end-begin) + duration;
+  }
   printf("execution time:%f\n", duration);
   return 0;
 }

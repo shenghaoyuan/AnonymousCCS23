@@ -19,20 +19,20 @@ Open Scope bool_scope.
 Open Scope asm.
 
 Lemma sub_mem_blk_trans:
-  forall m0 m1 m2 b ofs
-    (Hmem0: sub_mem_blk m0 m1 b ofs)
-    (Hmem1: sub_mem_blk m1 m2 b ofs),
-      sub_mem_blk m0 m2 b ofs.
+  forall m0 m1 m2 b low high
+    (Hmem0: sub_mem_blk m0 m1 b low high)
+    (Hmem1: sub_mem_blk m1 m2 b low high),
+      sub_mem_blk m0 m2 b low high.
 Proof.
   unfold sub_mem_blk; intros.
   rewrite Hmem0; auto.
 Qed.
 
 Lemma sub_mem_blk_less_than:
-  forall m0 m1 b ofs0 ofs1
-    (Hless: ofs1 <= ofs0)
-    (Hmem: sub_mem_blk m0 m1 b ofs0),
-      sub_mem_blk m0 m1 b ofs1.
+  forall m0 m1 b low0 high0 low1 high1
+    (Hless: low0 <= low1 /\ high1 <= high0)
+    (Hmem: sub_mem_blk m0 m1 b low0 high0),
+      sub_mem_blk m0 m1 b low1 high1.
 Proof.
   unfold sub_mem_blk; intros.
   rewrite Hmem; auto.
@@ -292,7 +292,7 @@ Lemma bpf_alu32_to_thumb_sub_mem:
     (Hptr: jitted_list st0 = Vptr arm_blk Ptrofs.zero)
     (Hmax: Z.of_nat (2 * jitted_len st0) <= Z.of_nat JITTED_LIST_MAX_LENGTH)
     (Hone : bpf_alu32_to_thumb ins st0 = Some st1),
-      sub_mem_blk (jit_mem st0) (jit_mem st1) arm_blk (Z.of_nat (2 * jitted_len st0)).
+      sub_mem_blk (jit_mem st0) (jit_mem st1) arm_blk 0 (Z.of_nat (2 * jitted_len st0)).
 Proof.
   unfold bpf_alu32_to_thumb, sub_mem_blk; intros.
   destruct ins in Hone; inversion Hone.
@@ -315,7 +315,7 @@ Proof.
       eapply upd_jitted_list_unchange_jittted_list in Hst1 as Heq1.
       eapply upd_jitted_list_jittted_len in Hst1 as Hle1.
 
-      eapply upd_jitted_list_load with (ofs1 := ofs1) (chunk := chunk) in Hst1 as Hsame1; eauto; try lia.
+      eapply upd_jitted_list_load with (ofs1 := ofs) (chunk := chunk) in Hst1 as Hsame1; eauto; try lia.
       rewrite Hsame1; clear Hsame1.
 
 
@@ -324,7 +324,7 @@ Proof.
       eapply upd_jitted_list_unchange_jittted_list in Hst2 as Heq2.
       eapply upd_jitted_list_jittted_len in Hst2 as Hle2.
 
-      eapply upd_jitted_list_load with (ofs1 := ofs1) (chunk := chunk) in Hst2 as Hsame2; eauto; try lia.
+      eapply upd_jitted_list_load with (ofs1 := ofs) (chunk := chunk) in Hst2 as Hsame2; eauto; try lia.
       2:{ rewrite <- Heq1. apply Hptr. }
       2:{ unfold upd_jitted_list, upd_jitted_list' in Hst2.
           destruct (2 * jitted_len j + 4 <=? JITTED_LIST_MAX_LENGTH)%nat eqn: Hcond; inversion Hst2.
@@ -333,7 +333,7 @@ Proof.
 
       rewrite Hsame2.
 
-      assert (Hrange: 0 <= ofs1 /\ ofs1 + size_chunk chunk <= Z.of_nat (2 * jitted_len j0)). {
+      assert (Hrange: 0 <= ofs /\ ofs + size_chunk chunk <= Z.of_nat (2 * jitted_len j0)). {
         lia.
       }
       assert (Hptr0: jitted_list j0 = Vptr arm_blk Ptrofs.zero). {
@@ -359,7 +359,7 @@ Proof.
         eapply upd_jitted_list_unchange_jittted_list in Hst3 as Heq3.
         eapply upd_jitted_list_jittted_len in Hst3 as Hle3.
 
-        eapply upd_jitted_list_load with (ofs1 := ofs1) (chunk := chunk) in Hst3 as Hsame3; eauto; try lia.
+        eapply upd_jitted_list_load with (ofs1 := ofs) (chunk := chunk) in Hst3 as Hsame3; eauto; try lia.
         rewrite Hsame3; clear Hsame3.
 
 
@@ -368,7 +368,7 @@ Proof.
         eapply upd_jitted_list_unchange_jittted_list in Hst4 as Heq4.
         eapply upd_jitted_list_jittted_len in Hst4 as Hle4.
 
-        eapply upd_jitted_list_load with (ofs1 := ofs1) (chunk := chunk) in Hst4 as Hsame4; eauto; try lia.
+        eapply upd_jitted_list_load with (ofs1 := ofs) (chunk := chunk) in Hst4 as Hsame4; eauto; try lia.
         2:{ rewrite <- Heq3. apply Hptr0. }
         2:{ unfold upd_jitted_list, upd_jitted_list' in Hst4.
             destruct (2 * jitted_len j1 + 4 <=? JITTED_LIST_MAX_LENGTH)%nat eqn: Hcond; inversion Hst4.
@@ -379,7 +379,7 @@ Proof.
 
         rewrite Hsame4.
 
-        assert (Hrange1: 0 <= ofs1 /\ ofs1 + size_chunk chunk <= Z.of_nat (2 * jitted_len j2)). {
+        assert (Hrange1: 0 <= ofs /\ ofs + size_chunk chunk <= Z.of_nat (2 * jitted_len j2)). {
           lia.
         }
         assert (Hptr1: jitted_list j2 = Vptr arm_blk Ptrofs.zero). {
@@ -429,7 +429,7 @@ Lemma jit_core_sub_mem:
   forall l st0 st1 arm_blk
     (Hptr: jitted_list st0 = Vptr arm_blk Ptrofs.zero)
     (Hjit : jit_core l st0 = Some st1),
-      sub_mem_blk (jit_mem st0) (jit_mem st1) arm_blk (Z.of_nat (2 * jitted_len st0)).
+      sub_mem_blk (jit_mem st0) (jit_mem st1) arm_blk 0 (Z.of_nat (2 * jitted_len st0)).
 Proof.
   induction l; unfold sub_mem_blk; simpl; intros.
   - inversion Hjit; reflexivity.
@@ -806,7 +806,7 @@ Lemma jit_alu32_thumb_upd_load_sub_mem:
     (Hptr: jitted_list st0 = Vptr arm_blk Ptrofs.zero)
     (Hmax: Z.of_nat (2 * jitted_len st0) <= Z.of_nat JITTED_LIST_MAX_LENGTH)
     (Hone : jit_alu32_thumb_upd_load r st0 = Some st1),
-      sub_mem_blk (jit_mem st0) (jit_mem st1) arm_blk (Z.of_nat (2 * jitted_len st0)).
+      sub_mem_blk (jit_mem st0) (jit_mem st1) arm_blk 0 (Z.of_nat (2 * jitted_len st0)).
 Proof.
   unfold sub_mem_blk; intros.
   unfold jit_alu32_thumb_upd_load in Hone.
@@ -830,7 +830,7 @@ Lemma jit_load_sub_mem:
   forall l st0 st1 arm_blk
     (Hptr: jitted_list st0 = Vptr arm_blk Ptrofs.zero)
     (Hjit : jit_alu32_thumb_load l st0 = Some st1),
-      sub_mem_blk (jit_mem st0) (jit_mem st1) arm_blk (Z.of_nat (2 * jitted_len st0)).
+      sub_mem_blk (jit_mem st0) (jit_mem st1) arm_blk 0 (Z.of_nat (2 * jitted_len st0)).
 Proof.
   induction l; unfold sub_mem_blk; simpl; intros.
   - inversion Hjit; reflexivity.
@@ -999,12 +999,12 @@ Qed.
 
 Lemma Hreg_mul4_unsigned:
   forall r,
-    Ptrofs.unsigned (Ptrofs.of_intu (Int.mul (int_of_ireg r) (Int.repr 4))) = (Z.of_nat (ireg2nat r)) * 4.
+    Ptrofs.unsigned (Ptrofs.of_intu (Int.mul (int_of_ireg r) (Int.repr 4))) = (Z_of_ireg r) * 4.
 Proof.
   intros.
   unfold Ptrofs.of_intu, Ptrofs.of_int, Int.mul.
   change (Int.unsigned (Int.repr 4)) with 4.
-  unfold int_of_ireg, ireg2nat.
+  unfold int_of_ireg, Z_of_ireg.
   rewrite Ptrofs.unsigned_repr.
   - rewrite Int.unsigned_repr.
     + destruct r; simpl; auto.
@@ -1057,11 +1057,11 @@ Qed.
 
 Lemma Hreg_unsigned:
   forall r,
-    Ptrofs.unsigned (Ptrofs.of_intu (int_of_ireg r)) = Z.of_nat (ireg2nat r).
+    Ptrofs.unsigned (Ptrofs.of_intu (int_of_ireg r)) = Z_of_ireg r.
 Proof.
   intros.
   unfold Ptrofs.of_intu, Ptrofs.of_int.
-  unfold int_of_ireg, ireg2nat.
+  unfold int_of_ireg, Z_of_ireg.
   rewrite Ptrofs.unsigned_repr.
   - rewrite Int.unsigned_repr.
     + reflexivity.
@@ -1425,3 +1425,368 @@ Proof.
         all: eapply upd_jitted_list_unchange_jit_regs_2; eauto.
 Qed.
 
+Lemma jit_alu32_thumb_upd_store_jitted_len_leb:
+  forall r st0 st1
+    (Hjit_store : jit_alu32_thumb_upd_store r st0 = Some st1),
+      (jitted_len st0 <= jitted_len st1)%nat.
+Proof.
+  unfold jit_alu32_thumb_upd_store, jit_alu32_thumb_load_store_template_jit.
+  intros.
+  eapply upd_jitted_list_jittted_len_2 in Hjit_store; eauto.
+  lia.
+Qed.
+
+Lemma jit_alu32_thumb_store_jitted_len_leb:
+  forall l st0 st1
+    (Hjit_store : jit_alu32_thumb_store l st0 = Some st1),
+      (jitted_len st0 <= jitted_len st1)%nat.
+Proof.
+  induction l; simpl; intros.
+  - injection Hjit_store as Heq; rewrite Heq; lia.
+  - destruct jit_alu32_thumb_upd_store eqn: Hone; [| inversion Hjit_store].
+    specialize (IHl _ _ Hjit_store).
+    rename j into stk.
+    eapply jit_alu32_thumb_upd_store_jitted_len_leb in Hone; eauto.
+    lia.
+Qed.
+
+Lemma jit_alu32_thumb_store_load_same:
+  forall l st0 st1 jit_blk chunk ofs
+    (Hjit_store : jit_alu32_thumb_store l st0 = Some st1)
+    (Harm_blk : jitted_list st0 = Vptr jit_blk Ptrofs.zero)
+    (Hrange : 0 <= ofs /\ ofs + size_chunk chunk <= Z.of_nat (2 * jitted_len st0)),
+    Mem.load chunk (jit_mem st0) jit_blk ofs = Mem.load chunk (jit_mem st1) jit_blk ofs.
+Proof.
+  induction l; simpl; intros.
+  - injection Hjit_store as Heq; rewrite Heq; reflexivity.
+  - destruct jit_alu32_thumb_upd_store eqn: Hone; [| inversion Hjit_store].
+    specialize (IHl _ _ jit_blk chunk ofs Hjit_store).
+    rename j into stk.
+
+    assert (Heq: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
+      unfold jit_alu32_thumb_upd_store, jit_alu32_thumb_load_store_template_jit in Hone.
+      eapply upd_jitted_list_unchange_jittted_list_2 in Hone; eauto.
+      rewrite <- Hone; assumption.
+    }
+    specialize (IHl Heq); clear Heq.
+
+    assert (Heq: 0 <= ofs /\ ofs + size_chunk chunk <= Z.of_nat (2 * jitted_len stk)). {
+      eapply jit_alu32_thumb_upd_store_jitted_len_leb in Hone; eauto.
+      lia.
+    }
+    specialize (IHl Heq); clear Heq.
+    rewrite <- IHl.
+    unfold jit_alu32_thumb_upd_store, jit_alu32_thumb_load_store_template_jit in Hone.
+    eapply upd_jitted_list_load_2 in Hone; eauto.
+    destruct upd_jitted_list eqn: Hupd; [| inversion Hone].
+    eapply upd_jitted_list_max in Hupd; eauto.
+    lia.
+Qed.
+
+Lemma jit_alu32_thumb_upd_reset_jitted_len_leb:
+  forall r st0 st1
+    (Hjit_reset : jit_alu32_thumb_upd_reset r st0 = Some st1),
+      (jitted_len st0 <= jitted_len st1)%nat.
+Proof.
+  unfold jit_alu32_thumb_upd_reset, jit_alu32_thumb_load_store_template_jit.
+  intros.
+  eapply upd_jitted_list_jittted_len_2 in Hjit_reset; eauto.
+  lia.
+Qed.
+
+Lemma jit_alu32_thumb_reset_jitted_len_leb:
+  forall l st0 st1
+    (Hjit_reset : jit_alu32_thumb_reset l st0 = Some st1),
+      (jitted_len st0 <= jitted_len st1)%nat.
+Proof.
+  induction l; simpl; intros.
+  - injection Hjit_reset as Heq; rewrite Heq; lia.
+  - destruct jit_alu32_thumb_upd_reset eqn: Hone; [| inversion Hjit_reset].
+    specialize (IHl _ _ Hjit_reset).
+    rename j into stk.
+    eapply jit_alu32_thumb_upd_reset_jitted_len_leb in Hone; eauto.
+    lia.
+Qed.
+
+Lemma jit_alu32_thumb_reset_load_same:
+  forall l st0 st1 jit_blk chunk ofs
+    (Hjit_reset : jit_alu32_thumb_reset l st0 = Some st1)
+    (Harm_blk : jitted_list st0 = Vptr jit_blk Ptrofs.zero)
+    (Hrange : 0 <= ofs /\ ofs + size_chunk chunk <= Z.of_nat (2 * jitted_len st0)),
+    Mem.load chunk (jit_mem st0) jit_blk ofs = Mem.load chunk (jit_mem st1) jit_blk ofs.
+Proof.
+  induction l; simpl; intros.
+  - injection Hjit_reset as Heq; rewrite Heq; reflexivity.
+  - destruct jit_alu32_thumb_upd_reset eqn: Hone; [| inversion Hjit_reset].
+    specialize (IHl _ _ jit_blk chunk ofs Hjit_reset).
+    rename j into stk.
+
+    assert (Heq: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
+      unfold jit_alu32_thumb_upd_reset, jit_alu32_thumb_load_store_template_jit in Hone.
+      eapply upd_jitted_list_unchange_jittted_list_2 in Hone; eauto.
+      rewrite <- Hone; assumption.
+    }
+    specialize (IHl Heq); clear Heq.
+
+    assert (Heq: 0 <= ofs /\ ofs + size_chunk chunk <= Z.of_nat (2 * jitted_len stk)). {
+      eapply jit_alu32_thumb_upd_reset_jitted_len_leb in Hone; eauto.
+      lia.
+    }
+    specialize (IHl Heq); clear Heq.
+    rewrite <- IHl.
+    unfold jit_alu32_thumb_upd_reset, jit_alu32_thumb_load_store_template_jit in Hone.
+    eapply upd_jitted_list_load_2 in Hone; eauto.
+    destruct upd_jitted_list eqn: Hupd; [| inversion Hone].
+    eapply upd_jitted_list_max in Hupd; eauto.
+    lia.
+Qed.
+
+(**r the JIT proof has some admitted lemmas that is time comsuming, TODO... *)
+Lemma upd_jitted_list_2_load:
+  forall vi vj st0 st1 jit_blk
+    (Hupd : match upd_jitted_list vi st0 with
+            | Some str_st =>
+                upd_jitted_list vj
+                  str_st
+            | None => None
+            end = Some st1)
+    (Hjit_inv : jitted_list st0 = Vptr jit_blk Ptrofs.zero),
+      Mem.load Mint16unsigned (jit_mem st1) jit_blk
+        (Ptrofs.unsigned (Ptrofs.of_int (Int.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))))) =
+         Some (Val.load_result Mint16unsigned (Vint vi)).
+Proof.
+  intros.
+  destruct upd_jitted_list eqn: Hupd2; [| inversion Hupd].
+  rename j into stk.
+  assert (Hinv: jitted_list stk = Vptr jit_blk Ptrofs.zero).
+  - rewrite <- Hjit_inv.
+    symmetry.
+    erewrite upd_jitted_list_unchange_jittted_list; eauto.
+  - eapply upd_jitted_list_load in Hupd2 as Heq; eauto.
+    admit.
+Admitted.
+
+
+Lemma upd_jitted_list_2_load_2:
+  forall vi vj st0 st1 jit_blk
+    (Hupd : match upd_jitted_list vi st0 with
+            | Some str_st =>
+                upd_jitted_list vj
+                  str_st
+            | None => None
+            end = Some st1)
+    (Hjit_inv : jitted_list st0 = Vptr jit_blk Ptrofs.zero),
+      Mem.load Mint16unsigned (jit_mem st1) jit_blk
+        (Ptrofs.unsigned (Ptrofs.add (Ptrofs.repr
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) (Ptrofs.of_int (Int.repr 2)))) =
+         Some (Val.load_result Mint16unsigned (Vint vj)).
+Proof.
+Admitted.
+
+Lemma jit_alu32_jit_blk_memory_layout:
+  forall l l_load l_store st st_pre st_save st_load st_core st_store st_reset jit_st0 m0 sp_blk jit_blk
+  (Hload_list : jit_alu32_load_list l = Some l_load)
+  (Hstore_list : jit_alu32_store_list l = Some l_store)
+  (Hjit_pre : jit_alu32_pre st = Some st_pre)
+  (Hjit_save : jit_alu32_thumb_save (jit_alu32_stack_list l_load l_store st_pre) st_pre = Some st_save)
+  (Hjit_load : jit_alu32_thumb_load l_load st_save = Some st_load)
+  (Hjit_core : jit_core l st_load = Some st_core)
+  (Hjit_store : jit_alu32_thumb_store l_store st_core = Some st_store)
+  (Hjit_reset : jit_alu32_thumb_reset (jit_alu32_stack_list l_load l_store st_pre) st_store = Some st_reset)
+  (Hjit_post : jit_alu32_post st_reset = Some jit_st0)
+  (Hmem: (m0, sp_blk) = Mem.alloc (jit_mem jit_st0) 0 48),
+    sub_mem_blk (jit_mem st_pre)    m0          jit_blk (Z.of_nat (2 * jitted_len st))       (Z.of_nat (2 * jitted_len st_pre)) /\
+    sub_mem_blk (jit_mem st_save)   m0          jit_blk (Z.of_nat (2 * jitted_len st_pre))   (Z.of_nat (2 * jitted_len st_save)).
+  Proof.
+  Admitted.
+
+Definition arm_registers_pre (rs0 rs1: Asm.regset) (st_blk: block): Prop :=
+  rs1 = nextinstr_nf false rs0 # IR12 <- (Vptr st_blk Ptrofs.zero).
+
+Definition arm_registers_spilling_one (r: ireg) (rs0: Asm.regset) (m0: mem): option mem :=
+  Mem.storev Mint32 m0
+      (Val.offset_ptr (rs0 IR13) (Ptrofs.of_intu (Int.mul (int_of_ireg r) (Int.repr 4)))) (rs0 r).
+
+Fixpoint arm_registers_spilling_aux (l: list ireg) (rs0: Asm.regset) (m0: mem): option (Asm.regset * mem) :=
+  match l with
+  | [] => Some (rs0, m0)
+  | hd :: tl =>
+    match arm_registers_spilling_one hd rs0 m0 with
+    | Some m1 => arm_registers_spilling_aux tl (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) ) m1
+    | None => None
+    end
+  end.
+
+Definition arm_registers_spilling (l: list ireg) (rs0 rs1: Asm.regset) (m0 m1: mem): Prop :=
+  match arm_registers_spilling_aux l rs0 m0 with
+  | Some (rs, m) => rs = rs1 /\ m = m1
+  | None => False
+  end.
+
+Definition arm_registers_store_one (r: reg) (rs0: Asm.regset) (m0: mem): option mem :=
+  Mem.storev Mint32 m0
+      (Val.offset_ptr (rs0 IR12) (Ptrofs.of_intu (Int.repr ((id_of_reg r + 1) * 8)))) (rs0 (ireg_of_reg r)).
+
+Fixpoint arm_registers_store_aux (l: list reg) (rs0: Asm.regset) (m0: mem): option (Asm.regset * mem) :=
+  match l with
+  | [] => Some (rs0, m0)
+  | hd :: tl =>
+    match arm_registers_store_one hd rs0 m0 with
+    | Some m1 => arm_registers_store_aux tl (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)) m1
+    | None => None
+    end
+  end.
+
+Definition arm_registers_store (l: list reg) (rs0 rs1: Asm.regset) (m0 m1: mem): Prop :=
+  match arm_registers_store_aux l rs0 m0 with
+  | Some (rs, m) => rs = rs1 /\ m = m1
+  | None => False
+  end.
+
+
+Lemma jit_alu32_jit_blk_memory_layout_1:
+  forall l l_load l_store st st_pre st_save st_load st_core st_store st_reset jit_st0 m0 sp_blk jit_blk rs0 st_blk
+  (Hload_list : jit_alu32_load_list l = Some l_load)
+  (Hstore_list : jit_alu32_store_list l = Some l_store)
+  (Hjit_pre : jit_alu32_pre st = Some st_pre)
+  (Hjit_save : jit_alu32_thumb_save (jit_alu32_stack_list l_load l_store st_pre) st_pre = Some st_save)
+  (Hjit_load : jit_alu32_thumb_load l_load st_save = Some st_load)
+  (Hjit_core : jit_core l st_load = Some st_core)
+  (Hjit_store : jit_alu32_thumb_store l_store st_core = Some st_store)
+  (Hjit_reset : jit_alu32_thumb_reset (jit_alu32_stack_list l_load l_store st_pre) st_store = Some st_reset)
+  (Hjit_post : jit_alu32_post st_reset = Some jit_st0)
+  (Hmem: (m0, sp_blk) = Mem.alloc (jit_mem jit_st0) 0 48)
+  (m1_spilling : mem) rs1_pre rs1_spilling
+  (Hrs_const_pre : arm_registers_pre rs0 rs1_pre st_blk)
+  (Hmem_pre: arm_registers_spilling (jit_alu32_stack_list l_load l_store st_pre) rs1_pre
+                     rs1_spilling m0 m1_spilling),
+    sub_mem_blk (jit_mem st_load)   m1_spilling jit_blk (Z.of_nat (2 * jitted_len st_save))  (Z.of_nat (2 * jitted_len st_load)) /\
+    sub_mem_blk (jit_mem st_core)   m1_spilling jit_blk (Z.of_nat (2 * jitted_len st_load))  (Z.of_nat (2 * jitted_len st_core)) /\
+    sub_mem_blk (jit_mem st_store)  m1_spilling jit_blk (Z.of_nat (2 * jitted_len st_core))  (Z.of_nat (2 * jitted_len st_store)).
+  Proof.
+  Admitted.
+
+Lemma jit_alu32_jit_blk_memory_layout_2:
+  forall l l_load l_store st st_pre st_save st_load st_core st_store st_reset jit_st0 m0 sp_blk jit_blk rs0 st_blk
+  (Hload_list : jit_alu32_load_list l = Some l_load)
+  (Hstore_list : jit_alu32_store_list l = Some l_store)
+  (Hjit_pre : jit_alu32_pre st = Some st_pre)
+  (Hjit_save : jit_alu32_thumb_save (jit_alu32_stack_list l_load l_store st_pre) st_pre = Some st_save)
+  (Hjit_load : jit_alu32_thumb_load l_load st_save = Some st_load)
+  (Hjit_core : jit_core l st_load = Some st_core)
+  (Hjit_store : jit_alu32_thumb_store l_store st_core = Some st_store)
+  (Hjit_reset : jit_alu32_thumb_reset (jit_alu32_stack_list l_load l_store st_pre) st_store = Some st_reset)
+  (Hjit_post : jit_alu32_post st_reset = Some jit_st0)
+  (Hmem: (m0, sp_blk) = Mem.alloc (jit_mem jit_st0) 0 48)
+  (m1_spilling : mem) rs1_pre rs1_spilling rs1_core rs1_store m_store
+  (Hrs_const_pre : arm_registers_pre rs0 rs1_pre st_blk)
+  (Hmem_pre: arm_registers_spilling (jit_alu32_stack_list l_load l_store st_pre) rs1_pre
+                     rs1_spilling m0 m1_spilling)
+  (Hmem_store : arm_registers_store l_store rs1_core rs1_store m1_spilling m_store),
+    sub_mem_blk (jit_mem st_reset)  m_store     jit_blk (Z.of_nat (2 * jitted_len st_store)) (Z.of_nat (2 * jitted_len st_reset)) /\
+    sub_mem_blk (jit_mem jit_st0)   m_store     jit_blk (Z.of_nat (2 * jitted_len st_reset)) (Z.of_nat (2 * jitted_len jit_st0)).
+  Proof.
+  Admitted.
+
+
+
+Lemma jit_alu32_jit_blk_unchange_jitted_list:
+  forall l l_load l_store st st_pre st_save st_load st_core st_store st_reset jit_st0 m0 sp_blk jit_blk
+  (Hload_list : jit_alu32_load_list l = Some l_load)
+  (Hstore_list : jit_alu32_store_list l = Some l_store)
+  (Hjit_pre : jit_alu32_pre st = Some st_pre)
+  (Hjit_save : jit_alu32_thumb_save (jit_alu32_stack_list l_load l_store st_pre) st_pre = Some st_save)
+  (Hjit_load : jit_alu32_thumb_load l_load st_save = Some st_load)
+  (Hjit_core : jit_core l st_load = Some st_core)
+  (Hjit_store : jit_alu32_thumb_store l_store st_core = Some st_store)
+  (Hjit_reset : jit_alu32_thumb_reset (jit_alu32_stack_list l_load l_store st_pre) st_store = Some st_reset)
+  (Hjit_post : jit_alu32_post st_reset = Some jit_st0)
+  (Hmem: (m0, sp_blk) = Mem.alloc (jit_mem jit_st0) 0 48)
+  (Hjit_list: jitted_list st = Vptr jit_blk Ptrofs.zero),
+    jitted_list st_pre = Vptr jit_blk Ptrofs.zero /\
+    jitted_list st_save = Vptr jit_blk Ptrofs.zero /\
+    jitted_list st_load = Vptr jit_blk Ptrofs.zero /\
+    jitted_list st_core = Vptr jit_blk Ptrofs.zero /\
+    jitted_list st_store = Vptr jit_blk Ptrofs.zero /\
+    jitted_list st_reset = Vptr jit_blk Ptrofs.zero /\
+    jitted_list jit_st0 = Vptr jit_blk Ptrofs.zero.
+  Proof.
+  Admitted.
+
+
+Lemma jit_alu32_jit_spilling_load_registers:
+  forall l l_load l_store st st_pre st_save st_load st_core st_store st_reset jit_st0 m0 sp_blk jit_blk
+    r m1_spilling rs1_pre rs1_spilling st_blk
+  (Hload_list : jit_alu32_load_list l = Some l_load)
+  (Hstore_list : jit_alu32_store_list l = Some l_store)
+  (Hjit_pre : jit_alu32_pre st = Some st_pre)
+  (Hjit_save : jit_alu32_thumb_save (jit_alu32_stack_list l_load l_store st_pre) st_pre = Some st_save)
+  (Hjit_load : jit_alu32_thumb_load l_load st_save = Some st_load)
+  (Hjit_core : jit_core l st_load = Some st_core)
+  (Hjit_store : jit_alu32_thumb_store l_store st_core = Some st_store)
+  (Hjit_reset : jit_alu32_thumb_reset (jit_alu32_stack_list l_load l_store st_pre) st_store = Some st_reset)
+  (Hjit_post : jit_alu32_post st_reset = Some jit_st0)
+  (Hmem: (m0, sp_blk) = Mem.alloc (jit_mem jit_st0) 0 48)
+  (Hjit_list: jitted_list st = Vptr jit_blk Ptrofs.zero)
+  (Hrs_const_spilling : arm_registers_spilling (jit_alu32_stack_list l_load l_store st_pre) rs1_pre
+                     rs1_spilling m0 m1_spilling),
+    Mem.load Mint32 m1_spilling st_blk ((id_of_reg r + 1) * 8) =
+    Mem.load Mint32 (jit_mem jit_st0) st_blk (8 * id_of_reg r + 8).
+  Proof.
+  Admitted.
+
+
+Lemma jit_alu32_jit_spilling_callee_save:
+  forall l l_load l_store st st_pre st_save st_load st_core st_store st_reset jit_st0 m0 sp_blk jit_blk
+    m1_spilling rs1_pre rs1_spilling
+  (Hload_list : jit_alu32_load_list l = Some l_load)
+  (Hstore_list : jit_alu32_store_list l = Some l_store)
+  (Hjit_pre : jit_alu32_pre st = Some st_pre)
+  (Hjit_save : jit_alu32_thumb_save (jit_alu32_stack_list l_load l_store st_pre) st_pre = Some st_save)
+  (Hjit_load : jit_alu32_thumb_load l_load st_save = Some st_load)
+  (Hjit_core : jit_core l st_load = Some st_core)
+  (Hjit_store : jit_alu32_thumb_store l_store st_core = Some st_store)
+  (Hjit_reset : jit_alu32_thumb_reset (jit_alu32_stack_list l_load l_store st_pre) st_store = Some st_reset)
+  (Hjit_post : jit_alu32_post st_reset = Some jit_st0)
+  (Hmem: (m0, sp_blk) = Mem.alloc (jit_mem jit_st0) 0 48)
+  (Hjit_list: jitted_list st = Vptr jit_blk Ptrofs.zero)
+  (Hrs_const_spilling : arm_registers_spilling (jit_alu32_stack_list l_load l_store st_pre) rs1_pre
+                     rs1_spilling m0 m1_spilling),
+    (forall r0 : ireg,
+    ~ In r0 (jit_alu32_stack_list l_load l_store st_pre) /\ In r0 arm_callee_save_regs ->
+    forall r1 : reg, In r1 l_load -> ireg_of_reg r1 <> r0) /\
+    (forall r0 : ireg,
+    ~ In r0 (jit_alu32_stack_list l_load l_store st_pre) /\ In r0 arm_callee_save_regs ->
+    forall r1 : reg, In r1 l_load -> ireg_of_reg r1 <> r0) /\
+    (forall r0 : ireg,
+    ~ In r0 (jit_alu32_stack_list l_load l_store st_pre) /\ In r0 arm_callee_save_regs ->
+    forall r1 : reg, In r1 l_store -> ireg_of_reg r1 <> r0).
+  Proof.
+  Admitted.
+
+
+
+
+Lemma jit_alu32_load_store_subst:
+  forall l l0 l1
+    (Hload_list : jit_alu32_load_list l = Some l0)
+    (Hstore_list : jit_alu32_store_list l = Some l1),
+      list_subset l1 l0.
+Proof.
+Admitted.
+
+Lemma jit_alu32_store_load_subst:
+  forall l l0 l1
+    (Hload_list : jit_alu32_load_list l = Some l0)
+    (Hstore_list : jit_alu32_store_list l = Some l1),
+      list_subset l0 l1.
+Proof.
+Admitted.
+
+Lemma list_subst_nodup:
+  forall (l0:list reg) l1,
+    NoDup l1 ->
+    list_subset l0 l1 ->
+      NoDup l0.
+Proof.
+Admitted.

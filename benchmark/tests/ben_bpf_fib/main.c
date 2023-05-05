@@ -75,12 +75,14 @@ static struct memory_region mr_stack = {.start_addr = (uintptr_t)_bpf_stack,
 
 
 int main(void){  
+  float duration = 0;
+  for (int loop_size = 0; loop_size < 1000; loop_size++) {
 
 #ifdef MODULE_GEN_BPF
   struct memory_region memory_regions[] = { mr_stack };
   struct bpf_state st = {
     .state_pc = 0,
-    .regsmap = {0LLU, 10LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, (uintptr_t)_bpf_stack+512},
+    .regsmap = {0LLU, 1LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, 0LLU, (uintptr_t)_bpf_stack+512},
     .bpf_flag = vBPF_OK,
     .mrs = memory_regions,
     .mrs_num = ARRAY_SIZE(memory_regions),
@@ -91,7 +93,7 @@ int main(void){
   jitted_thumb_list = ibpf_state.jitted_thumb_list;
   ibpf_full_state_init(&ibpf_state, 1);
   ibpf_set_code(&ibpf_state, fib_compcert_bpf_bin, sizeof(fib_compcert_bpf_bin));
-  ibpf_set_input(&ibpf_state, 10LLU, 0LLU, 0LLU, 0LLU, 0LLU);
+  ibpf_set_input(&ibpf_state, 1LLU, 0LLU, 0LLU, 0LLU, 0LLU);
   jit_alu32(&ibpf_state.st);
 #else
   bpf_t bpf = {
@@ -120,8 +122,8 @@ int main(void){
   printf("Vanilla-rBPF C result = 0x:%x\n", (unsigned int)result);
 #endif
   uint32_t end = ztimer_now(ZTIMER_USEC);
-  float duration = (float)(end-begin);
-  
+  duration = (float)(end-begin) + duration;
+  }
   printf("execution time:%f\n", duration);
   return 0;
 }

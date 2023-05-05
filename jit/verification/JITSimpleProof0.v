@@ -1,6 +1,6 @@
 From compcert.lib Require Import Integers.
 From compcert.arm Require Import Asm AsmSyntax BinSyntax BinSem BinDecode.
-From compcert.common Require Import Values Memory.
+From compcert.common Require Import AST Values Memory.
 
 From bpf.comm Require Import Regs.
 From bpf.jit.thumb Require Import Arm32Reg ThumbInsOp JITState.
@@ -263,4 +263,54 @@ Lemma lemma_thumb_str :
       find_instr (Vptr arm_blk (Ptrofs.repr ofs0)) (jit_mem st1) = Some (Pstr rt rn (SOimm (Int.repr i)), true).
 Proof.
   intros.
+Admitted.
+
+Lemma lemma_thumb_breg :
+  forall st0 st1 arm_blk ofs0 m0
+    (Harm_blk : jitted_list st0 = Vptr arm_blk Ptrofs.zero)
+    (Hofs0 : ofs0 = Z.of_nat (jitted_len st0 + (jitted_len st0 + 0))),
+      match
+        Mem.load Mint16unsigned (jit_mem st1) arm_blk
+          (Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (2 * jitted_len st0))))
+      with
+      | Some (Vint op) =>
+          if is_thumb2 op
+          then
+           match
+             Mem.load Mint16unsigned m0 arm_blk
+               (Ptrofs.unsigned
+                  (Ptrofs.repr
+                     (Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (2 * jitted_len st0))) +
+                      Ptrofs.unsigned (Ptrofs.of_int (Int.repr 2)))))
+           with
+           | Some (Vint i) => Coqlib.option_map (fun x : instruction => (x, true)) (decode_thumb2 op i)
+           | _ => None
+           end
+          else Coqlib.option_map (fun x : instruction => (x, false)) (decode_thumb op)
+      | _ => None
+      end = Some (Pbreg IR14, false).
+Proof.
+  intros.
+Admitted.
+
+Lemma lemma_thumb_mov_1 :
+  forall m b ofs,
+    match
+    Val.load_result Mint16unsigned
+      (Vint
+         (encode_arm32 Int.one (encode_arm32 Int.one (encode_arm32 (Int.repr 4) MOV_R_OP 0 3) 3 4) 7 1))
+    with
+    | Vint op =>
+        if is_thumb2 op
+        then
+         match
+           Mem.load Mint16unsigned m b ofs
+         with
+         | Some (Vint i) => Coqlib.option_map (fun x : instruction => (x, true)) (decode_thumb2 op i)
+         | _ => None
+         end
+        else Coqlib.option_map (fun x : instruction => (x, false)) (decode_thumb op)
+    | _ => None
+    end = Some (Pmov IR12 (SOreg IR1), false).
+Proof.
 Admitted.

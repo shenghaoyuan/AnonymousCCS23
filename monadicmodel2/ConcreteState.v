@@ -206,7 +206,7 @@ Qed.
 Lemma eval_upd_reg_other:
   forall r r0 v st0 st1
     (Hreg_neq: r <> r0)
-    (Hreg_blk: exists regs_blk, regs_st st0 = Vptr regs_blk Ptrofs.zero)
+    (Hreg_blk: exists st_blk, regs_st st0 = Vptr st_blk (Ptrofs.repr 8))
     (Hupd_reg : upd_reg r (Vlong v) st0 = Some st1),
       eval_reg r0 st0 = eval_reg r0 st1.
 Proof.
@@ -226,10 +226,22 @@ Proof.
   eapply Mem.load_store_other; eauto.
   right.
   clear - Hreg_neq Heqv0 Heqv1.
-  rewrite ! Ptrofs.add_zero_l.
   simpl.
   subst v0 v1.
+  unfold Ptrofs.add.
+  change (Ptrofs.unsigned (Ptrofs.repr 8)) with 8.
   rewrite ! ptrofs_unsigned_repr_reg_mul_8.
+
+  rewrite Ptrofs.unsigned_repr.
+  2:{
+    change Ptrofs.max_unsigned with 4294967295.
+    unfold id_of_reg; destruct r0; lia.
+  }
+  rewrite Ptrofs.unsigned_repr.
+  2:{
+    change Ptrofs.max_unsigned with 4294967295.
+    unfold id_of_reg; destruct r; lia.
+  }
 
   unfold id_of_reg; destruct r; destruct r0; try lia.
 

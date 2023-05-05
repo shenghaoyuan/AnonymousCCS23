@@ -1,0 +1,31 @@
+
+sock_flags1.o:	file format ELF64-BPF
+
+
+Disassembly of section .text:
+
+0000000000000000 bpf_prog1:
+; {
+       0:	bf 20 00 00 00 00 00 00	r0 = r2
+;   if (sk->family == AF_INET6 &&
+       1:	61 12 04 00 00 00 00 00	r2 = *(u32 *)(r1 + 4)
+       2:	55 02 06 00 0a 00 00 00	if r2 != 10 goto +6 <LBB0_4>
+;       sk->type == SOCK_DGRAM   &&
+       3:	61 12 08 00 00 00 00 00	r2 = *(u32 *)(r1 + 8)
+       4:	55 02 04 00 01 00 00 00	if r2 != 1 goto +4 <LBB0_4>
+;       sk->protocol == IPPROTO_ICMPV6)
+       5:	61 11 0c 00 00 00 00 00	r1 = *(u32 *)(r1 + 12)
+;   if (sk->family == AF_INET6 &&
+       6:	55 01 02 00 3a 00 00 00	if r1 != 58 goto +2 <LBB0_4>
+;     return uid & 0xabcd;
+       7:	54 00 00 00 cd ab 00 00	w0 &= 43981
+       8:	05 00 02 00 00 00 00 00	goto +2 <LBB0_5>
+
+0000000000000048 LBB0_4:
+       9:	77 00 00 00 20 00 00 00	r0 >>= 32
+;   return gid & 0xeffe;
+      10:	54 00 00 00 fe ef 00 00	w0 &= 61438
+
+0000000000000058 LBB0_5:
+; }
+      11:	95 00 00 00 00 00 00 00	exit

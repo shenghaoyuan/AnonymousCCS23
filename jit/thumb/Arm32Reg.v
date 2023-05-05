@@ -96,9 +96,29 @@ Definition ireg2nat (r: ireg): nat :=
   | IR14 => 14
   end.
 
-Definition int_of_ireg (r: ireg): int := Int.repr (Z.of_nat (ireg2nat r)).
 
-Definition int16_of_ireg (r: ireg): int := Int.repr (Z.of_nat (ireg2nat r)).
+Definition Z_of_ireg (r: ireg): Z :=
+  match r with
+  | IR0 => 0
+  | IR1 => 1
+  | IR2 => 2
+  | IR3 => 3
+  | IR4 => 4
+  | IR5 => 5
+  | IR6 => 6
+  | IR7 => 7
+  | IR8 => 8
+  | IR9 => 9
+  | IR10 => 10
+  | IR11 => 11
+  | IR12 => 12
+  | IR13 => 13
+  | IR14 => 14
+  end.
+
+Definition int_of_ireg (r: ireg): int := Int.repr (Z_of_ireg r).
+
+Definition int16_of_ireg (r: ireg): int := Int.repr (Z_of_ireg r).
 
 Lemma ireg_eqb_true:
   forall x y, x = y <-> ireg_eqb x y = true.

@@ -12,26 +12,111 @@ From bpf.jit.verification Require Import JITListSet.
 From bpf.jit.verification Require Import rBPFSemInd JITSimple JITSimpleProofWholeDef JITSimpleProofWholeAux JITSimpleProof0.
 From bpf.jit.simulation Require Import BitfieldLemma.
 
-From Coq Require Import List ZArith Arith String Lia.
+From Coq Require Import List ZArith Arith String Lia Logic.FunctionalExtensionality.
 Import ListNotations.
 Open Scope Z_scope.
 Open Scope bool_scope.
 Open Scope asm.
 
+Lemma add_ofs_2:
+  forall st0 st1 ofs0 ofs1
+    (Hlen_eq : S (jitted_len st0) = jitted_len st1)
+    (Hofs0 : ofs0 = Z.of_nat (2 * jitted_len st0))
+    (Hofs1 : ofs1 = Z.of_nat (2 * jitted_len st1))
+    (Hcond : (2 * jitted_len st0 <= 1000)%nat),
+      Ptrofs.add (Ptrofs.repr ofs0) (Ptrofs.repr 2) = Ptrofs.repr ofs1.
+Proof.
+  intros.
+  rewrite Hofs0, Hofs1.
+  rewrite <- Hlen_eq.
+  unfold Ptrofs.add.
+  change (Ptrofs.unsigned (Ptrofs.repr 2)) with 2.
+  rewrite Ptrofs.unsigned_repr.
+  - f_equal.
+    lia.
+  - change Ptrofs.max_unsigned with 4294967295; lia.
+Qed.
+
+Lemma add_ofs_4:
+  forall st0 st1 ofs0 ofs1
+    (Hlen_eq : S (S (jitted_len st0)) = jitted_len st1)
+    (Hofs0 : ofs0 = Z.of_nat (2 * jitted_len st0))
+    (Hofs1 : ofs1 = Z.of_nat (2 * jitted_len st1))
+    (Hcond : (2 * jitted_len st0 <= 1000)%nat),
+      Ptrofs.add (Ptrofs.repr ofs0) (Ptrofs.repr 4) = Ptrofs.repr ofs1.
+Proof.
+  intros.
+  rewrite Hofs0, Hofs1.
+  rewrite <- Hlen_eq.
+  unfold Ptrofs.add.
+  change (Ptrofs.unsigned (Ptrofs.repr 4)) with 4.
+  rewrite Ptrofs.unsigned_repr.
+  - f_equal.
+    lia.
+  - change Ptrofs.max_unsigned with 4294967295; lia.
+Qed.
+
+Lemma Ptrofs_unsigned_of_int_reg_add_mul_8:
+  forall r,
+    (Ptrofs.unsigned (Ptrofs.of_int (Int.add
+      (Int.mul (int_of_reg r) (Int.repr 8)) (Int.repr 8)))) = (id_of_reg r + 1) * 8.
+Proof.
+  intros.
+  unfold Ptrofs.of_int, Int.add, Int.mul, int_of_reg.
+  change (Int.unsigned (Int.repr 8)) with 8.
+  rewrite Int.unsigned_repr with (z := id_of_reg r).
+  - rewrite Int.unsigned_repr with (z := (id_of_reg r * 8)).
+    + rewrite Int.unsigned_repr with (z := (id_of_reg r * 8 + 8)).
+      * rewrite Ptrofs.unsigned_repr; [lia | ].
+        unfold id_of_reg; change Ptrofs.max_unsigned with 4294967295; destruct r; lia.
+      * unfold id_of_reg; change Int.max_unsigned with 4294967295; destruct r; lia.
+    + unfold id_of_reg; change Int.max_unsigned with 4294967295; destruct r; lia.
+  - unfold id_of_reg; change Int.max_unsigned with 4294967295; destruct r; lia.
+Qed.
+
+Lemma upd_jitted_list_load:
+  forall vi st0 st1 jit_blk
+    (Hupd : upd_jitted_list vi st0 = Some st1)
+    (Hjit_inv : jitted_list st0 = Vptr jit_blk Ptrofs.zero),
+      Mem.load Mint16unsigned (jit_mem st1) jit_blk
+        (Ptrofs.unsigned (Ptrofs.of_int (Int.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))))) =
+         Some (Val.load_result Mint16unsigned (Vint vi)).
+Proof.
+  intros.
+  unfold upd_jitted_list, upd_jitted_list' in Hupd.
+  destruct ((2 * jitted_len _ + 4 <=? JITTED_LIST_MAX_LENGTH)%nat); [| inversion Hupd].
+  rewrite Hjit_inv in Hupd.
+  simpl in Hupd.
+  destruct Mem.store eqn: Hstore; [| inversion Hupd].
+  injection Hupd as Heq.
+  rename m into st1_m.
+  rewrite Ptrofs.add_zero_l in Hstore.
+  eapply Mem.load_store_same in Hstore; eauto.
+
+  assert (Heq1: (jit_mem st1) = st1_m). {
+    rewrite <- Heq.
+    simpl; reflexivity.
+  }
+  rewrite Heq1 in *; clear Heq1.
+  assumption.
+Qed.
+
+
 Section JITProofWhole.
 
-  Variable old_sp: val.
+  (*Variable old_sp: val. *)
   Variable ge : genv.
 
-  (** Definition *)
-  Variable flag_blk: block.
-  Variable regs_blk: block.
-  Variable jit_blk: block.
-  Variable jit_state_blk: block.
+  Hypothesis arm_reg_value: forall (arm_rs : regset) (r : PregEq.t),
+    (exists vi : int, arm_rs r = Vint vi) \/ (exists (b : block) (o : ptrofs), arm_rs r = Vptr b o).
 
+  Hypothesis llvm_enable_alu32:
+    forall r st v st_blk,
+    eval_reg r st = Some (Val.longofintu (Vint v))  <->
+    Mem.load Mint32 (bpf_m st) st_blk (8 * id_of_reg r + 8) = Some (Vint v).
 
   Section MatchStaterBPFJIT.
-
+  (*
     Record match_state_jit (rbpf_st: state) (jit_st: jit_state): Prop :=
     {
       munchange:  Mem.unchanged_on (fun b _ => b <> jit_blk /\ b <> jit_state_blk) (bpf_m rbpf_st) (jit_mem jit_st);
@@ -60,162 +145,82 @@ Section JITProofWhole.
                     (forall b, b <> jit_blk ->
                       Mem.valid_block (bpf_m rbpf_st) b -> Mem.valid_block (jit_mem jit_st) b);
       mvalid   : jit_state_memory_layout jit_st jit_state_blk regs_blk (jit_mem jit_st);
-    }.
-
+    }. *)
+    Definition rbpf_state_inv (st: jit_state) (jit_blk: block) : Prop :=
+      jitted_list st = Vptr jit_blk Ptrofs.zero (* /\
+      jit_regs st = Vptr regs_blk Ptrofs.zero *).
   End MatchStaterBPFJIT.
 
-(*
-  Section MatchStaterBPFJITSYNC.
+  Definition  regs_unchanged (l: sync_regs) (m0 m1: mem) (st_blk: block): Prop := (**r for all BPF unused registers *)
+  forall r, ~ List.In r l ->
+    exists vi : int,
+      Mem.load Mint32 m0 st_blk (8 * id_of_reg r + 8) = Some (Vint vi) /\
+      Mem.load Mint32 m1 st_blk (8 * id_of_reg r + 8) = Some (Vint vi).
 
-    Record match_state_jit_sync (rbpf_st: state) (jit_st: jit_state) (l: sync_regs): Prop :=
-    {
-      munchange_sync:  Mem.unchanged_on (fun b _ => b <> jit_blk /\ b <> jit_state_blk) (bpf_m rbpf_st) (jit_mem jit_st);
-      mpc_sync      :  Int.cmp Cle (jit_pc jit_st) (pc_loc rbpf_st) = true;
-      mflag_sync    :  match_flag rbpf_st jit_st flag_blk;
-      mregs_sync    :  match_registers_syn rbpf_st jit_st l regs_blk;
-      mmrs_num_sync :  mrs_num rbpf_st = jit_mrs_num jit_st;
-      mbpf_mrs_sync :  bpf_mrs rbpf_st = jit_mrs jit_st;
-      mins_len_sync :  ins_len rbpf_st = jit_ins_len jit_st;
-      mins_sync     :  ins rbpf_st = jit_ins jit_st;
-      mjit_sync     :  Vptr jit_blk Ptrofs.zero = jitted_list jit_st;
-
-      mperm_sync    :  ptr_range_perm (bpf_m rbpf_st) Mint32 (flag rbpf_st) Freeable /\
-                  (forall r, ptr_range_perm (bpf_m rbpf_st) Mint64
-                      (Val.add (regs_st rbpf_st) (Vint (Int.repr (8 * (id_of_reg r))))) Freeable) /\
-                  ptr_range_perm (jit_mem jit_st) Mint32 (jit_flag jit_st) Freeable /\
-                  (forall r, ptr_range_perm (jit_mem jit_st) Mint64
-                    (Val.add (jit_regs jit_st) (Vint (Int.repr (8 * (id_of_reg r))))) Freeable) /\
-                  (forall pc, (0 <= pc < Nat.div JITTED_LIST_MAX_LENGTH 2)%nat ->
-                    ptr_range_perm (jit_mem jit_st) Mint16unsigned
-                      (Val.add (JITState.jitted_list jit_st) (Vint (Int.repr (Z.of_nat (2 * pc))))) Freeable);
-      minvalid_sync :  ~Mem.valid_block (bpf_m rbpf_st) jit_blk /\
-                  Mem.valid_block (jit_mem jit_st) jit_blk /\
-                    (block_neq flag_blk regs_blk jit_blk jit_state_blk) /\
-                    (forall b, b <> jit_blk ->
-                      Mem.valid_block (bpf_m rbpf_st) b -> Mem.valid_block (jit_mem jit_st) b);
-      mvalid_sync   : jit_state_memory_layout jit_st jit_state_blk regs_blk (jit_mem jit_st);
-    }.
-
-  End MatchStaterBPFJITSYNC.
-*)
+  Definition  stack_unchanged (lsr_stack: sync_iregs) (rs0 rs1: Asm.regset): Prop :=(**r for all callee-save unused registers *)
+  forall r,
+    ~List.In r lsr_stack /\ List.In r arm_callee_save_regs ->
+      rs0 r = rs1 r.
 
   Section MatchStateJITARM.
 
-    Record match_state_initial_arm (st0 st_final: jit_state) (rs: Asm.regset) (m: mem): Prop :=
-    {
-      munchange_init0: Mem.unchanged_on (fun b _ => (* b <> jit_blk /\ *) b <> regs_blk /\
-                          (*b <> jit_state_blk /\ *) not_stack_blk (rs IR13) b) m (jit_mem st_final);
-      munchange_init1: Mem.unchanged_on (fun b _ => (* b <> jit_blk /\ *) b <> regs_blk /\
-                          (*b <> jit_state_blk /\ *) not_stack_blk (rs IR13) b) (jit_mem st_final) m;
-      munchange_init2: Mem.unchanged_on (fun b _ => not_stack_blk (rs IR13) b) (jit_mem st0) m;
-      mregs_init:      arm_initial_state m rs jit_state_blk regs_blk old_sp
-                        (Vptr jit_blk (Ptrofs.repr (Z.of_nat (2 * (jitted_len st0)))));(*
-      mvalid_init:    Mem.valid_block m jit_blk; *)
+    Record match_state_arm (st: state) (old_rs rs: Asm.regset) (m: mem)
+      (lr: sync_regs) (ls: sync_iregs)
+      (st_blk jit_blk sp_blk ra_blk: block) (ofs: Z) (old_sp: val): Prop := {
+      arm_rs14:       exists ofs, rs IR14 = Vptr ra_blk ofs;
+      arm_reg_syn:    regs_agree lr st rs /\ NoDup lr;
+      arm_reg_same:   regs_unchanged lr (bpf_m st) m st_blk;
+      arm_stack_syn:  arm_synch_stack ls old_rs rs m old_sp /\ NoDup ls;
+      arm_old_sp:     rs IR13 = Vptr sp_blk Ptrofs.zero /\ Mem.loadv Mint32 m (rs IR13) = Some old_sp;
+      arm_pc:         rs PC = Vptr jit_blk (Ptrofs.repr ofs);
+      arm_valid_blk:  (st_blk <> jit_blk /\ st_blk <> sp_blk /\ jit_blk <> sp_blk) /\
+                      Mem.valid_block m jit_blk /\ Mem.valid_block m st_blk /\ Mem.valid_block m sp_blk;
+      arm_blk_perm:   Mem.range_perm m st_blk 0 96 Cur Writable /\
+                      Mem.range_perm m sp_blk 0 48 Cur Writable;
+      arm_reg_valid:  forall (arm_rs: Asm.regset) r, (exists vi, arm_rs r = Vint vi) \/ (exists b o, arm_rs r = Vptr b o)
     }.
-
-    Inductive match_state_arm:
-      state -> (**r rbpf_state *)
-      Asm.regset -> mem -> (**r ARM state *)
-      Asm.regset -> (**r initial ARM register map *)
-      sync_regs -> (**r synchronous rBPF regsiters *)
-      sync_iregs -> (**r callee-save ARM registers *)
-      block -> Z -> (**r jitted block and PC offset *) (*
-      jit_state -> (**r the current JIT state *) *)
-      jit_state -> (**r the after-JIT JIT state *)
-      Prop :=
-    | exec_step:
-        forall lsr lsr_stack rbpf_st rs old_rs jit_st_final arm_blk ofs arm_mem
-          (**r all rBPF registers in lsr are synchronous with the ARM registers *)
-          (Hreg_agree: regs_agree lsr rbpf_st rs)
-          (**r all call-save registers in lsr_stack are stored in ARM stack, and the rest in ARM stack are Vundef *)
-          (Hstack: arm_synch_stack arm_mem rs old_rs old_sp lsr_stack)
-          (**r the current PC location *)
-          (HPC_eq: rs PC = Vptr arm_blk (Ptrofs.repr ofs))
-          (**r the arm memory is a subset of the final jit state *) (* This is an assumption 
-          (Hsub_mem: sub_mem_blk (jit_mem jit_st) (jit_mem jit_st_final) arm_blk ofs) *)
-          (Hvalid_arm_blk: Mem.valid_block (jit_mem jit_st_final) arm_blk)
-          (Harm_mem1: Mem.unchanged_on (fun b _ => b <> regs_blk /\ not_stack_blk (rs IR13) b) (jit_mem jit_st_final) arm_mem)
-          (Harm_mem2: Mem.unchanged_on (fun b _ => b <> regs_blk /\ not_stack_blk (rs IR13) b) arm_mem (jit_mem jit_st_final))
-          ,
-          match_state_arm rbpf_st rs arm_mem old_rs lsr lsr_stack arm_blk ofs jit_st_final.
   End MatchStateJITARM.
 
 
   Section JITPre.
 
-    Definition arm_registers_pre (rs0 rs1: Asm.regset): Prop :=
-      rs1 = (rs0 # IR12 <- (Vptr regs_blk Ptrofs.zero)) # PC <- (Val.offset_ptr (rs0 PC) wsize).
-
-    Lemma jit_pre_simulation: forall rbpf_st st0 st1 st_final rs0 ofs0 ofs1 init_arm_mem
+    Lemma jit_pre_simulation: forall rbpf_st st0 st1 rs0 m0 ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
     (Hjit_pre: jit_alu32_pre st0 = Some st1)
     (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
-    (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1)))) (*
-    (Harm_blk: jitted_list st0 = Vptr jit_blk Ptrofs.zero) *)
-    (Hmem: sub_mem_blk (jit_mem st1) (jit_mem st_final) jit_blk ofs1)
-    (Hinitial_arm_st0: match_state_initial_arm st0 st_final rs0 init_arm_mem)
-    (Harm_inv: arm_memory_inv0 st0 rs0 rs0 init_arm_mem init_arm_mem
-        flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True) )
-(*
-    (Hunchanged: Mem.unchanged_on (fun (b : block) (_ : Z) =>
-        b <> jit_blk /\ not_stack_blk (rs0 IR13) b) (jit_mem st0) (jit_mem st_final)) *)
-
-    (Hst: match_state_jit rbpf_st st0),
+    (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
+    (Hmem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+    (Hjit_inv: rbpf_state_inv st0 jit_blk)
+    (Hinitial_arm_st0: match_state_arm rbpf_st rs0 rs0 m0 [] [] st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+    (Hrs_1: rs0 IR1 = Vptr st_blk Ptrofs.zero),
       exists rs1,
-        arm_registers_pre rs0 rs1 /\
-        arm_memory_inv0 st1 rs0 rs1 init_arm_mem init_arm_mem 
-          flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True) /\
-        star BinSem.step ge (State rs0 init_arm_mem) E0 (State rs1 init_arm_mem) /\
-        match_state_arm rbpf_st rs1 init_arm_mem rs0 [] [] jit_blk ofs1 st_final.
+        arm_registers_pre rs0 rs1 st_blk /\
+        rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+        stack_unchanged [] rs0 rs1 /\
+        star BinSem.step ge (State rs0 m0) E0 (State rs1 m0) /\
+        match_state_arm rbpf_st rs0 rs1 m0 [] [] st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
     Proof.
       intros.
-      assert(Hmatch_state_0: match_state_arm rbpf_st rs0 init_arm_mem rs0 [] [] jit_blk ofs0 st_final). {
-        clear - Hofs0 (*Harm_blk*) Hst Hinitial_arm_st0 Hst Harm_inv.
-        destruct Hinitial_arm_st0 as (Hregs_init0, Hregs_init1, Hregs_init2, Hinit_stack).
-        unfold arm_initial_state in Hinit_stack.
-        split.
-        - (**r regs_agree *)
-          unfold regs_agree.
-          intros r HF.
-          inversion HF.
-        - (**r arm_synch_stack *)
-          unfold arm_synch_stack.
-          destruct Hinit_stack as (_ & arm_stack & _).
-          unfold arm_initial_stack in arm_stack.
-          destruct arm_stack as (Hold_sp & Hstack).
-          split; [assumption | ].
-          intros r HF; inversion HF.
-        - (**r PC *)
-          destruct Hinit_stack as (_ & _ & Hpc).
-          rewrite Hofs0.
-          assumption.
-        - (**r Mem.valid_block *)
-          destruct Hst.
-          destruct minvalid0 as (_ & Hvalid & _).
-          eapply Mem.valid_block_unchanged_on in Hregs_init2; eauto.
-          eapply Mem.valid_block_unchanged_on in Hregs_init0; eauto.
-        - (**r Mem.unchanged_on *)
-          assumption.
-        - (**r Mem.unchanged_on *)
-          assumption.
-      }
-
-      clear Hmatch_state_0.
-
       unfold arm_registers_pre.
-      exists ((rs0 # IR12 <- (Vptr regs_blk Ptrofs.zero)) # PC <- (Val.offset_ptr (rs0 PC) wsize)).
+      eexists.
       split; [(**r arm_registers_pre *) reflexivity | ].
 
-      destruct Hinitial_arm_st0 as (Hmem_init0, Hmem_init1, Hmem_init2, Hinit_stack).
-      destruct Hst.
-      unfold arm_initial_state in Hinit_stack.
-      destruct Hinit_stack as (Hr1 & Hstack & Hpc).
+      destruct Hinitial_arm_st0 as (Harm_ir14, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, Harm_old_sp,
+        Harm_pc, Harm_valid_blk, Harm_blk_perm, arm_reg_valid).
+
+      split.
+      { (**r rs1 IR12 = Vptr st_blk Ptrofs.zero *)
+        unfold nextinstr_nf, nextinstr, undef_flags.
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        rewrite Pregmap.gss.
+        f_equal.
+      }
+
 
       unfold jit_alu32_pre, jit_alu32_thumb_load_store_template_jit in Hjit_pre.
-      apply upd_jitted_list_jittted_len_2 in Hjit_pre as Hlen_eq.
+      apply upd_jitted_list_jittted_len in Hjit_pre as Hlen_eq.
 
       assert (Hcond: (2 * jitted_len st0 <= 1000)%nat). {
         simpl.
-        destruct upd_jitted_list in Hjit_pre; [| inversion Hjit_pre].
         apply upd_jitted_list_max2 in Hjit_pre.
         clear - Hjit_pre Hlen_eq.
         unfold JITTED_LIST_MAX_LENGTH in Hjit_pre.
@@ -230,239 +235,67 @@ Section JITProofWhole.
       }
 
       split.
-      { (**r arm_memory_inv0 *)
-        clear - Hjit_pre Hlen_eq Hofs0 Hofs1 Harm_inv mjit0 mflag0 mregs0.
-        destruct Harm_inv.
-        destruct arm_inv_reg as (Harm_inv_reg0 & arm_inv_reg1 & arm_inv_reg2).
-        split; try assumption.
-        2:{ (**r jit_state_memory_layout *)
-          unfold jit_state_memory_layout in *.
-          destruct arm_inv_st as (Hload & Hregs_layout).
-          split; [assumption | ].
-          unfold regs_layout in *.
-          intros r.
-          specialize (Hregs_layout r).
-          destruct Hregs_layout as (vi & Heval_reg & Hload64 & Hload32 & Haxiom).
-          exists vi.
-          split.
-          - rewrite <- Heval_reg.
-            symmetry.
-            eapply upd_jitted_list_unchange_eval_jit_reg_2
-              with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-            + (**r jit_regs st0 = Vptr regs_blk Ptrofs.zero *)
-              unfold match_registers in mregs0.
-              destruct mregs0 as (_ & Heq & _).
-              assumption.
-            + destruct arm_inv_stk as (_ & Hsp_spec).
-              unfold arm_stack_pointer_spec in Hsp_spec.
-              destruct Hsp_spec as (sp_blk & _ & _ & Hneq & _).
-              clear - Hneq; unfold block_neq in Hneq.
-              intuition.
-          - split; [assumption | ].
-            split; [assumption | ].
-            intros vj Heval_reg0.
-            apply Haxiom.
-            rewrite <- Heval_reg0.
-            eapply upd_jitted_list_unchange_eval_jit_reg_2
-              with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-            + (**r jit_regs st0 = Vptr regs_blk Ptrofs.zero *)
-              unfold match_registers in mregs0.
-              destruct mregs0 as (_ & Heq & _).
-              assumption.
-            + destruct arm_inv_stk as (_ & Hsp_spec).
-              unfold arm_stack_pointer_spec in Hsp_spec.
-              destruct Hsp_spec as (sp_blk & _ & _ & Hneq & _).
-              clear - Hneq; unfold block_neq in Hneq.
-              intuition.
-        }
-        split; [ assumption | ].
-        split; [  | assumption ].
-        clear - Harm_inv_reg0.
-        unfold arm_assume_register_map in *.
-        intros r.
-        specialize (Harm_inv_reg0 r).
-        destruct r.
-        - rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          destruct i; try (rewrite Pregmap.gss; auto);
-            try (rewrite Pregmap.gso; [ | intros HF; inversion HF]); try assumption.
-        - repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-        - repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-        - rewrite Pregmap.gss; auto.
-          unfold Val.offset_ptr; destruct (rs0 PC); auto.
+      {
+        (**r stack_unchanged *)
+        unfold stack_unchanged.
+        intros r Hin.
+        unfold nextinstr_nf, nextinstr, undef_flags.
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        - reflexivity.
+        - destruct Hin as (_ & Hin).
+          subst r.
+          repeat (destruct Hin as [Hin | Hin]; [inversion Hin |]).
+          inversion Hin.
       }
 
       split.
-      - (**r star BinSem.step *)
+      { (**r star BinSem.step *)
         eapply star_one; eauto.
-        eapply exec_step_bin; eauto.
-        + (**r find_instr *)
-          rewrite Hpc.
-          assert (Hjit_eq: find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st_final) =
-                          find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) init_arm_mem). {
-            unfold find_instr.
-            rewrite Hofs0; simpl.
-            erewrite Mem.load_unchanged_on_1 with (m := init_arm_mem); eauto.
-            - (**r Mem.load *)
-              destruct Mem.load; [| reflexivity].
-              destruct v; try reflexivity.
-              erewrite Mem.load_unchanged_on_1 with (m := init_arm_mem); eauto.
-              + (**r Mem.valid_block *)
-                destruct minvalid0 as (_ & Hvalid_blk & _).
-                eapply Mem.valid_block_unchanged_on in Hmem_init2; eauto.
-              + intros.
-                simpl.
-                clear - minvalid0 Harm_inv.
-                unfold block_neq in minvalid0.
-                destruct minvalid0 as (_ & _ & (Hblk_neq0 & Hblk_neq1) & _).
-                destruct Hblk_neq0 as (Hblk_neq00 & Hblk_neq01 & Hblk_neq02).
-                destruct Hblk_neq1 as (Hblk_neq10 & Hblk_neq11 & Hblk_neq12).
-                split; [assumption |].
-                unfold not_stack_blk.
-                destruct Harm_inv.
-                destruct arm_inv_stk as (_ & arm_inv_stk0).
-                destruct arm_inv_stk0 as (old_sp_blk & Hold_sp_eq & Harm_sp).
-                rewrite Hold_sp_eq.
-                destruct Harm_sp as ((_ & Hneq & _) & _).
-                clear - Hneq.
-                auto.
-            - (**r Mem.valid_block *)
-              destruct minvalid0 as (_ & Hvalid_blk & _).
-              eapply Mem.valid_block_unchanged_on in Hmem_init2; eauto.
-            - (**r block neq *)
-              intros.
-              simpl.
-              clear - minvalid0 Harm_inv.
-              unfold block_neq in minvalid0.
-              destruct minvalid0 as (_ & _ & (Hblk_neq0 & Hblk_neq1) & _).
-              destruct Hblk_neq0 as (Hblk_neq00 & Hblk_neq01 & Hblk_neq02).
-              destruct Hblk_neq1 as (Hblk_neq10 & Hblk_neq11 & Hblk_neq12).
-              split; [assumption |].
-              unfold not_stack_blk.
-              destruct Harm_inv.
-              destruct arm_inv_stk as (_ & arm_inv_stk0).
-              destruct arm_inv_stk0 as (old_sp_blk & Hold_sp_eq & Harm_sp).
-              rewrite Hold_sp_eq.
-              destruct Harm_sp as ((_ & Hneq & _) & _).
-              clear - Hneq.
-              auto.
-          }
-          rewrite <- Hofs0.
-          rewrite <- Hjit_eq; clear.
+        eapply exec_step_bin with (i := Pmov IR12 (SOreg IR1)) (w := false); eauto.
+        - (**r find_instr *)
+          rewrite Harm_pc.
 
-          assert (Heq: find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st_final) =
-                        find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st1)). {
-            unfold find_instr.
-            rewrite Hofs0; simpl.
-            clear - flag_blk regs_blk jit_blk jit_state_blk Hofs1 Hjit_pre Hmem Hcond Hlen_eq Hlen_eq0.
-            unfold sub_mem_blk in Hmem.
-            repeat rewrite <- Hmem.
+          unfold find_instr.
+          eapply upd_jitted_list_load in Hjit_pre; eauto.
 
-            3:{
-              rewrite Hofs1.
-              rewrite Hlen_eq0.
-              simpl.
-              lia.
-            }
-
-            2:{
-              simpl.
-              unfold Ptrofs.add, Ptrofs.of_int.
-              rewrite Hlen_eq0.
-              change (Ptrofs.unsigned (Ptrofs.repr (Int.unsigned (Int.repr 2)))) with 2.
-
-              assert (Hlen_eq1: Ptrofs.unsigned (Ptrofs.repr 
-                    (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2))  = 
-                  (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2)). {
-                rewrite Ptrofs.unsigned_repr.
-                reflexivity.
-                change Ptrofs.max_unsigned with 4294967295; lia.
-              }
-              rewrite Hlen_eq1.
-              lia.
-            }
-            reflexivity.
-          }
-
-          rewrite Heq; clear Heq.
-
-          instantiate (2 := Pldr IR12 IR1 (SOimm (Int.repr 8))).
-          instantiate (1 := true).
-          eapply lemma_thumb_ldr; eauto.
-          lia.
-        + (**r exec_instr *)
-          simpl.
-          rewrite Hr1; simpl.
-          rewrite Ptrofs.add_zero_l.
-          unfold exec_load; simpl.
-
-          clear - mvalid0 Hmem_init2 Harm_inv.
-          unfold jit_state_memory_layout, Mem.loadv in mvalid0.
-          destruct mvalid0 as (Hload & _).
-          eapply Mem.load_unchanged_on in Hload; eauto.
-          * (**r Mem.load *)
-            change (Ptrofs.unsigned (Ptrofs.repr 8)) with 8 in Hload.
-            change (Ptrofs.unsigned (Ptrofs.of_int (Int.repr 8))) with 8.
-            rewrite Hload.
-            unfold nextinstr; simpl.
-            rewrite Pregmap.gso; [ reflexivity | intros HF; inversion HF].
-          * (**r P neq *)
-            intros; simpl.
-            unfold not_stack_blk.
-            destruct Harm_inv.
-            destruct arm_inv_stk as (_ & arm_inv_stk0).
-            destruct arm_inv_stk0 as (old_sp_blk & Hold_sp_eq & Harm_sp).
-            rewrite Hold_sp_eq.
-            destruct Harm_sp as ((_ & _ & _ & Hneq) & _).
-            clear - Hneq.
-            auto.
-
-      - (**r match_state_arm *)
-        split.
-        + (**r regs_agree *)
-          unfold regs_agree.
-          intros r HF.
-          inversion HF.
-        + (**r arm_synch_stack *)
-          unfold arm_synch_stack.
-          unfold arm_initial_stack in Hstack.
-          split.
-          * (**r Mem.loadv old_sp *)
-            unfold Mem.loadv in *; simpl.
-            clear - Hstack.
-            rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            destruct Hstack as (Hload & Hlayout).
-            rewrite Hload.
-            reflexivity.
-          * (**r stack layout *)
-            intros r HF; inversion HF.
-        + (**r PC eq *)
-          rewrite Pregmap.gss.
-          rewrite Hpc.
-          rewrite <- Hlen_eq in Hofs1.
-          rewrite Hofs1.
-
-          unfold Val.offset_ptr, wsize, Ptrofs.add.
-          f_equal. f_equal.
-          change (Ptrofs.unsigned (Ptrofs.repr 4)) with 4.
-          rewrite Ptrofs.unsigned_repr.
+          rewrite Hofs0; simpl.
+          unfold sub_mem_blk in Hmem.
+          rewrite <- Hmem.
           2:{
-            change Ptrofs.max_unsigned with 4294967295; lia.
+            rewrite Hofs1, Hofs0.
+            rewrite <- Hlen_eq.
+            rewrite Hlen_eq0.
+            change (size_chunk Mint16unsigned) with 2.
+            lia.
           }
 
-          lia.
-        + (**r Mem.valid_block *)
-          destruct minvalid0 as (_ & Hvalid & _).
-          eapply Mem.valid_block_unchanged_on in Hmem_init2; eauto.
-          eapply Mem.valid_block_unchanged_on in Hmem_init0; eauto.
-        + (**r Mem.unchanged_on *)
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          assumption.
-        + (**r Mem.unchanged_on *)
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          assumption.
+          unfold Ptrofs.of_int in Hjit_pre.
+          rewrite Int.unsigned_repr in Hjit_pre.
+          2:{ change Int.max_unsigned with 4294967295; lia. }
+          rewrite Hjit_pre.
+          eapply lemma_thumb_mov_1; eauto.
+        - (**r exec_instr *)
+          simpl.
+          rewrite Hrs_1.
+          f_equal.
+      }
+
+      constructor; try assumption.
+      - (**r Harm_stack_syn *)
+        destruct Harm_reg_syn as (Harm_reg_syn & Hnodup).
+        split; [| assumption].
+        unfold regs_agree.
+        intros r Hin; inversion Hin.
+
+      - (**r Harm_pc *)
+        unfold nextinstr_nf, nextinstr, undef_flags.
+        rewrite Pregmap.gss.
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        rewrite Harm_pc.
+        unfold Val.offset_ptr, wsize.
+        f_equal.
+        eapply add_ofs_2; eauto.
     Qed.
   End JITPre.
 
@@ -497,35 +330,15 @@ Section JITProofWhole.
 
   Section JITSpilling.
 
-    Definition arm_registers_spilling_one (r: ireg) (rs0: Asm.regset) (m0: mem): option mem :=
-      Mem.storev Mint32 m0
-          (Val.offset_ptr (rs0 IR13) (Ptrofs.of_intu (Int.mul (int_of_ireg r) (Int.repr 4)))) (rs0 r).
-
-    Fixpoint arm_registers_spilling_aux (l: list ireg) (rs0: Asm.regset) (m0: mem): option (Asm.regset * mem) :=
-      match l with
-      | [] => Some (rs0, m0)
-      | hd :: tl =>
-        match arm_registers_spilling_one hd rs0 m0 with
-        | Some m1 => arm_registers_spilling_aux tl (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) ) m1
-        | None => None
-        end
-      end.
-
-    Definition arm_registers_spilling (l: list ireg) (rs0 rs1: Asm.regset) (m0 m1: mem): Prop :=
-      match arm_registers_spilling_aux l rs0 m0 with
-      | Some (rs, m) => rs = rs1 /\ m = m1
-      | None => False
-      end.
-
     Lemma arm_registers_spilling_aux_load_same:
-      forall l rs0 m0 rs1 m1 r
+      forall l rs0 m0 rs1 m1 r sp_blk
         (Haux: arm_registers_spilling_aux l rs0 m0 = Some (rs1, m1))
         (Harm_callee_save: forall r : ireg, In r l -> In r arm_callee_save_regs)
         (Hnin : ~ In r l)
         (Hr_in: In r arm_callee_save_regs)
-        (Hsp_spec: arm_stack_pointer_spec rs0 m0 flag_blk regs_blk jit_blk jit_state_blk)
-        (Hstack2 : Mem.loadv Mint32 m0 (Val.offset_ptr (rs0 IR13) (Ptrofs.of_intu (Int.mul (int_of_ireg r) (Int.repr 4)))) = Some (rs0 r)),
-          Mem.loadv Mint32 m1 (Val.offset_ptr (rs0 IR13) (Ptrofs.of_intu (Int.mul (int_of_ireg r) (Int.repr 4)))) = Some (rs0 r).
+        (Hsp_blk: rs0 IR13 = Vptr sp_blk Ptrofs.zero)
+        (Hstack2 : Mem.load Mint32 m0 sp_blk (Z_of_ireg r * 4) = Some (rs0 r)),
+          Mem.load Mint32 m1 sp_blk (Z_of_ireg r * 4) = Some (rs0 r).
     Proof.
       induction l; intros.
       { simpl in Haux.
@@ -537,11 +350,11 @@ Section JITProofWhole.
       destruct arm_registers_spilling_one eqn: Hone; [| inversion Haux].
       rename m into mk.
 
-      unfold arm_stack_pointer_spec in Hsp_spec.
-      unfold arm_stack_pointer_spec.
-      unfold block_neq in Hsp_spec.
-      destruct Hsp_spec as (sp_blk & Hrs_eq & (Hneq0 & Hneq1 & Hneq2 & Hnew3) & Hneq4 & Hperm).
       unfold arm_registers_spilling_one in Hone.
+      rewrite Hsp_blk in Hone.
+      simpl in Hone.
+      rewrite Ptrofs.add_zero_l in *.
+      rewrite Hreg_mul4_unsigned in *.
 
       eapply IHl with (rs0 := rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)); eauto.
       - intros r0 Hin.
@@ -550,32 +363,11 @@ Section JITProofWhole.
       - intros HF.
         apply Hnin.
         right; assumption.
-      - exists sp_blk.
-        split.
-        { rewrite Pregmap.gso; [ | intros HF; inversion HF]. assumption. }
-        split.
-        { repeat (split; [assumption | ]). assumption. }
-        split.
-        { unfold block_neq. assumption.  }
-
-        unfold Mem.range_perm in *.
-        intros ofs Hofs.
-        specialize (Hperm ofs Hofs).
-        unfold arm_registers_spilling_one in *.
-        rewrite Hrs_eq in Hone.
-        simpl in Hone.
-        rewrite Ptrofs.add_zero_l in Hone.
-        eapply Mem.perm_store_1; eauto.
       - rewrite Pregmap.gso; [ | intros HF; inversion HF].
-        rewrite Hrs_eq in *.
-        rewrite Pregmap.gso; [ | intros HF; inversion HF].
-        simpl. simpl in Hstack2.
         rewrite <- Hstack2.
-        simpl in Hone.
-        rewrite Ptrofs.add_zero_l in *.
+
         eapply Mem.load_store_other; eauto.
         right.
-        repeat rewrite Hreg_mul4_unsigned.
         assert (Hneq: r <> a). {
           intro HF.
           apply Hnin. left.
@@ -589,7 +381,7 @@ Section JITProofWhole.
 
         change (size_chunk Mint32) with 4.
         clear - Hr_in Hneq Hin.
-        unfold ireg2nat.
+        unfold Z_of_ireg.
 
         destruct Hr_in as [Hr_in | Hr_in].
         { subst r.
@@ -657,24 +449,23 @@ Section JITProofWhole.
         inversion Hr_in.
     Qed.
 
-    Definition arm_registers_pre_weak (rs: Asm.regset): Prop :=
-      (rs IR12) = (Vptr regs_blk Ptrofs.zero).
+    Definition arm_registers_pre_weak (rs: Asm.regset) (st_blk: block): Prop :=
+      (rs IR12) = (Vptr st_blk Ptrofs.zero).
 
     Lemma arm_registers_pre_implies:
-      forall rs rs0
-        (Hpre: arm_registers_pre rs rs0),
-          arm_registers_pre_weak rs0.
+      forall rs rs0 st_blk
+        (Hpre: arm_registers_pre rs rs0 st_blk),
+          arm_registers_pre_weak rs0 st_blk.
     Proof.
       unfold arm_registers_pre, arm_registers_pre_weak; intros.
       rewrite Hpre.
+      unfold nextinstr_nf, nextinstr, undef_flags. Search undef_flags.
       rewrite Pregmap.gso; [ | intros HF; inversion HF].
       rewrite Pregmap.gss.
       reflexivity.
     Qed.
 
-
-    Lemma jit_spilling_one_simulation: forall l r rbpf_st st0 st1 st_final rs0 ofs0 ofs1 m0
-      (Hpre: arm_registers_pre_weak rs0)
+    Lemma jit_spilling_one_simulation: forall l r rbpf_st st0 st1 rs_init rs0 m0 ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
       (Hupd_spilling : jit_alu32_thumb_upd_save r st0 = Some st1)
 
       (Hlist_not_in: ~ List.In r l)
@@ -682,35 +473,25 @@ Section JITProofWhole.
       (Harm_callee_save: forall r, List.In r l -> List.In r arm_callee_save_regs)
       (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
       (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
-      (Harm_blk: jitted_list st0 = Vptr jit_blk Ptrofs.zero)
-      (Hreg_blk: jit_regs st0 = Vptr regs_blk Ptrofs.zero)
 
-      (Harm_inv: arm_memory_inv0 st0 rs0 rs0 m0 m0 
-        flag_blk regs_blk jit_blk jit_state_blk (fun b _ => not_stack_blk (rs0 IR13) b))
-      (Hsub_mem: sub_mem_blk (jit_mem st1) (jit_mem st_final) jit_blk ofs1)
+      (Hsub_mem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
 
-      (Harm: match_state_arm rbpf_st rs0 m0 rs0 [] l jit_blk ofs0 st_final)
-(*
-      (Hunchanged: Mem.unchanged_on (fun (b : block) (_ : Z) =>
-          b <> jit_blk /\ not_stack_blk old_sp b) (jit_mem st0) (jit_mem st_final)) *),
+      (Hstack_unchanged:  stack_unchanged l rs_init rs0)
+      (Harm: match_state_arm rbpf_st rs_init rs0 m0 [] l st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+      (Hr_eq: rs0 r = rs_init r)
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
         exists rs1 m1,
           arm_registers_spilling_one r rs0 m0 = Some m1 /\
           rs1 = rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) /\
-          arm_registers_pre_weak rs1 /\
-          arm_memory_inv0 st1 rs0 rs1 m0 m1
-            flag_blk regs_blk jit_blk jit_state_blk (fun b _ => not_stack_blk (rs0 IR13) b) /\
+          rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          stack_unchanged (r::l) rs_init rs1 /\
           star BinSem.step ge (State rs0 m0) E0 (State rs1 m1) /\
-          match_state_arm rbpf_st rs1 m1 rs0 [] (r::l) jit_blk ofs1 st_final.
+          match_state_arm rbpf_st rs_init rs1 m1 [] (r::l) st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
     Proof.
       intros.
-      set (el := []).
-      assert (Heq1: el = []) by auto.
-      rewrite <- Heq1 in Harm.
-
-      destruct Harm_inv.
-      destruct arm_inv_stk as (_ & arm_inv_stk0).
-      unfold arm_stack_pointer_spec in arm_inv_stk0.
-      destruct arm_inv_stk0 as (sp_blk & Hsp_blk & (Hneq0 & Hneq1 & Hneq2 & Hneq3) & Hneq4 & Hperm).
+      destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+        Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
 
       exists (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)).
 
@@ -720,17 +501,17 @@ Section JITProofWhole.
       simpl.
       rewrite Ptrofs.add_zero_l.
       rewrite Hreg_mul4_unsigned.
-      unfold Mem.range_perm in Hperm. (**r here we need the info: r is in arm_callee_save *)
+      unfold Mem.range_perm in Hsp_blk_perm. (**r here we need the info: r is in arm_callee_save *)
 
-      assert (Heq: Mem.valid_access m0 Mint32 sp_blk (Z.of_nat (ireg2nat r) * 4) Writable). {
+      assert (Heq: Mem.valid_access m0 Mint32 sp_blk (Z_of_ireg r * 4) Writable). {
         unfold Mem.valid_access.
         split.
         - unfold Mem.range_perm.
           intros ofs Hrange.
-          apply Hperm.
+          apply Hsp_blk_perm.
           change (size_chunk Mint32) with 4 in Hrange.
           clear - Hrange Hcallee_save.
-          unfold ireg2nat in Hrange.
+          unfold Z_of_ireg in Hrange.
           repeat (destruct Hcallee_save as [Hcallee_save | Hcallee_save]; [ subst r; lia | ]).
           inversion Hcallee_save.
         - simpl.
@@ -745,165 +526,115 @@ Section JITProofWhole.
         eapply upd_jitted_list_jittted_len_2; eauto.
       }
 
-      assert (Hle: Z.of_nat (2 * jitted_len st0) <= Z.of_nat JITTED_LIST_MAX_LENGTH). {
+      assert (Hle: (2 * jitted_len st0 <= JITTED_LIST_MAX_LENGTH)%nat). {
         clear - Hupd_spilling.
         unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hupd_spilling.
         destruct upd_jitted_list eqn: Hupd; [| inversion Hupd_spilling].
-        eapply upd_jitted_list_max; eauto.
+        eapply upd_jitted_list_max in Hupd; eauto.
+        lia.
+      }
+      unfold JITTED_LIST_MAX_LENGTH in Hle.
+
+      assert (Hlen_eq0: Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))). {
+        rewrite Ptrofs.unsigned_repr.
+        reflexivity.
+        change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+
+      assert (Hlen_eq1: Ptrofs.unsigned (Ptrofs.add 
+          (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) (Ptrofs.of_int (Int.repr 2))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2)). {
+        unfold Ptrofs.add.
+        change (Ptrofs.unsigned (Ptrofs.of_int (Int.repr 2))) with 2.
+        rewrite Ptrofs.unsigned_repr.
+        - rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+        - change Ptrofs.max_unsigned with 4294967295.
+          rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
       }
 
       exists m1.
       split; [assumption | ].
       split; [(**r rs PC *) f_equal | ].
       split.
-      { (**r arm_registers_pre_weak *)
-        unfold arm_registers_pre_weak.
+      { (**r rs IR12 *)
         rewrite Pregmap.gso; [ | intros HF; inversion HF].
-        unfold arm_registers_pre_weak in Hpre.
         assumption.
       }
+
       split.
-      { (**r arm_memory_inv0 *)
-        constructor; try assumption.
-        - (**r rs IR13 *)
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          split; [f_equal | ].
-          unfold arm_stack_pointer_spec.
-          exists sp_blk.
-          split; [assumption | ].
-          split.
-          { repeat (split; [assumption | ]). assumption. }
-          split; [assumption | ].
-          unfold Mem.range_perm; assumption.
-        - (**r arm_assume_register_map *)
-          destruct arm_inv_reg as (Harm_inv_reg0 & Harm_inv_reg1 & arm_inv_reg2).
-          split; [assumption | ].
-          split; [ | assumption].
-          clear - Harm_inv_reg0.
-          unfold arm_assume_register_map in *.
-          intros r.
-          specialize (Harm_inv_reg0 r).
-          destruct r.
-          + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            destruct i; try (rewrite Pregmap.gss; auto);
-              try (rewrite Pregmap.gso; [ | intros HF; inversion HF]); try assumption.
-          + repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-          + repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-          + rewrite Pregmap.gss; auto.
-            unfold Val.offset_ptr; destruct (rs0 PC); auto.
-        - (**r jit_state_memory_layout *)
-          unfold jit_state_memory_layout in *.
-          destruct arm_inv_st as (Hload & Hregs_layout).
-          split; [assumption | ].
-          unfold regs_layout in *.
-          intros r0.
-          specialize (Hregs_layout r0).
-          destruct Hregs_layout as (vi & Heval_reg & Hload64 & Hload32 & Haxiom).
-          exists vi.
-          split.
-          + rewrite <- Heval_reg.
-            symmetry.
-            eapply upd_jitted_list_unchange_eval_jit_reg_2
-              with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-            clear - Hneq4; unfold block_neq in Hneq4.
-            intuition.
-          + split; [assumption | ].
-            split; [assumption | ].
-            intros vj Heval_reg0.
-            apply Haxiom.
-            rewrite <- Heval_reg0.
-            eapply upd_jitted_list_unchange_eval_jit_reg_2
-              with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-            clear - Hneq4; unfold block_neq in Hneq4.
-            intuition.
-        - (**r Mem.unchanged_on *)
-          eapply Mem.store_unchanged_on; eauto. (*
-          intros ofs Hrange.
-          rewrite Hsp_blk.
-          unfold not_stack_blk.
-          auto. *)
+      {
+        (**r stack_unchanged *)
+        unfold stack_unchanged in *.
+        intros r0 Hin.
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        eapply Hstack_unchanged; eauto.
+        destruct Hin as (Hin1 & Hin).
+        split; [| assumption].
+        intros HF; apply Hin1.
+        right; assumption.
       }
+
       split.
       { (**r star BinSem.step *)
-        set (old_rs := rs0).
-        assert (Heq: match_state_arm rbpf_st rs0 m0 old_rs el l jit_blk ofs0 st_final) by auto.
-        clear Harm; rename Heq into Harm.
-        assert (Hrs_eq: old_rs = rs0) by auto.
-
-        destruct Harm.
-        subst lsr old_rs.
-        rename rs into rs0.
-        rename arm_mem0 into m0.
-        rename ofs into ofs0.
-
         eapply star_one.
-        eapply exec_step_bin.
+        eapply exec_step_bin with (i := Pstr r IR13 (SOimm (Int.mul (int_of_ireg r) (Int.repr 4)))) (w := true).
         - (**r find_instr *)
-          instantiate (2 := Pstr r IR13 (SOimm (Int.mul (int_of_ireg r) (Int.repr 4)))).
-          instantiate (1 := true).
+          rewrite Harm_pc.
 
-          rewrite HPC_eq.
-
-          assert (Heq: find_instr (Vptr arm_blk (Ptrofs.repr ofs0)) (jit_mem jit_st_final) =
-                        find_instr (Vptr arm_blk (Ptrofs.repr ofs0)) m0). {
+          assert (Heq: find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) m0 =
+            find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st1)). {
             unfold find_instr.
-            simpl.
-            erewrite <- Mem.load_unchanged_on_1; eauto.
-
-            - (**r Mem.load *)
-              destruct Mem.load eqn: Hload; [| reflexivity].
-              erewrite <- Mem.load_unchanged_on_1; eauto.
-              + (**r block neq *)
-                intros ofs Hofs_range.
-                simpl.
-                rewrite Hsp_blk; unfold not_stack_blk.
-                clear - Hneq1 Hneq4.
-                unfold block_neq in Hneq4.
-                intuition.
-            - (**r block neq *)
-              intros ofs Hofs_range.
-              simpl.
-              rewrite Hsp_blk; unfold not_stack_blk.
-              clear - Hneq1 Hneq4.
-              unfold block_neq in Hneq4.
-              intuition.
-          }
-          rewrite <- Heq; clear Heq.
-
-          assert (Heq: find_instr (Vptr arm_blk (Ptrofs.repr ofs0)) (jit_mem jit_st_final) =
-                        find_instr (Vptr arm_blk (Ptrofs.repr ofs0)) (jit_mem st1)). {
-
-            unfold find_instr.
-            simpl.
             unfold sub_mem_blk in Hsub_mem.
-            erewrite Hsub_mem; eauto.
-            destruct Mem.load eqn: Hload; [| reflexivity].
-            - erewrite Hsub_mem; eauto.
-              rewrite <- Hst0_eq in Hofs1.
-              rewrite Hofs1, Hofs0.
 
-              unfold Ptrofs.add.
-              unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hupd_spilling.
-              destruct upd_jitted_list eqn: Hupd; [| inversion Hupd_spilling].
-              erewrite upd_jitted_list_unsigned_repr_add_2; eauto.
+            unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hupd_spilling.
+            unfold rbpf_state_inv in Hjit_inv.
+            eapply upd_jitted_list_2_load with (jit_blk := jit_blk) in Hupd_spilling as Hload; eauto.
+            eapply upd_jitted_list_2_load_2 with (jit_blk := jit_blk) in Hupd_spilling as Hload2; eauto.
+
+            simpl.
+            rewrite Hofs0; simpl.
+            rewrite <- Hsub_mem.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hst0_eq.
+              rewrite Hlen_eq0.
               change (size_chunk Mint16unsigned) with 2.
               lia.
-            - rewrite <- Hst0_eq in Hofs1.
-              rewrite Hofs1, Hofs0.
+            }
 
-              unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hupd_spilling.
-              destruct upd_jitted_list eqn: Hupd; [| inversion Hupd_spilling].
-              erewrite upd_jitted_list_unsigned_repr; eauto.
+            unfold Ptrofs.of_int in Hload.
+            rewrite Int.unsigned_repr in Hload.
+            2:{ change Int.max_unsigned with 4294967295; lia. }
+            rewrite Hload.
+            simpl.
+            rewrite <- Hsub_mem.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hst0_eq.
+              rewrite Hlen_eq1.
               change (size_chunk Mint16unsigned) with 2.
               lia.
+            }
+            unfold Ptrofs.of_int in Hload2.
+            rewrite Int.unsigned_repr in Hload2.
+            2:{ change Int.max_unsigned with 4294967295; lia. }
+            unfold Ptrofs.of_int.
+            change (Int.unsigned (Int.repr 2)) with 2.
+            rewrite Hload2.
+            simpl.
+            reflexivity.
           }
-          rewrite Heq; clear Heq.
+          rewrite Heq.
           eapply lemma_thumb_str; eauto.
+
           change (Int.unsigned (Int.repr 4)) with 4.
           unfold int_of_ireg.
           rewrite Int.unsigned_repr;
             [| change Int.max_unsigned with 4294967295];
-            unfold ireg2nat; destruct r; simpl; lia.
+            unfold Z_of_ireg; destruct r; simpl; lia.
         - (**r exec_instr *)
           simpl.
           rewrite Hsp_blk; simpl.
@@ -914,219 +645,194 @@ Section JITProofWhole.
           f_equal.
       }
       { (**r match_state_arm *)
-
-        set (old_rs := rs0).
-        assert (Heq: match_state_arm rbpf_st rs0 m0 old_rs el l jit_blk ofs0 st_final) by auto.
-        clear Harm; rename Heq into Harm.
-        assert (Heq3: old_rs = rs0) by auto.
-
-        destruct Harm.
-        subst old_rs lsr.
-
-        rename ofs into ofs0.
-        rename rs into rs0.
-        rename arm_mem0 into m0.
-        rename lsr_stack into l.
-
         constructor.
+        + (**r ra_blk *)
+          assumption.
         + (**r regs_agree *)
-          unfold regs_agree.
-          intros r0 HF.
-          inversion HF.
+          assumption.
+        + (**r regs_unchanged *)
+          unfold regs_unchanged in *.
+          intros r0 HT.
+          specialize (Harm_reg_same _ HT).
+          destruct Harm_reg_same as (vi & Hload0 & Hload1).
+          exists vi.
+          split; [assumption |].
+          rewrite <- Hload1.
+          eapply Mem.load_store_other; eauto.
+          left.
+          intuition.
         + (**r arm_synch_stack *)
-
-          unfold arm_synch_stack.
+          unfold arm_synch_stack in *.
           rewrite Pregmap.gso; [ | intros HF; inversion HF].
 
-          unfold arm_synch_stack in Hstack.
-
-          destruct Hstack as (Hload & Hstack).
+          destruct Harm_stack_syn as (Hload & HNoDup).
           rewrite Hsp_blk in *.
           simpl in Hload.
+          simpl.
           split.
           {
+            intros r0 Hin.
             simpl.
-            rewrite <- Hload.
-            clear - Hcallee_save Hstore.
-            eapply Mem.load_store_other; eauto.
-            right; left.
-            change (Ptrofs.unsigned Ptrofs.zero + size_chunk Mint32) with 4.
-            unfold ireg2nat.
-            repeat (destruct Hcallee_save as [Hcallee_save | Hcallee_save]; [ subst r; lia | ]).
-            inversion Hcallee_save.
-          }
+            rewrite Ptrofs.add_zero_l.
+            rewrite Hreg_mul4_unsigned.
+            destruct Hin as [Hreg_eq | Hin].
+            - (**r r0 = r *)
+              subst r0.
+              erewrite Mem.load_store_same; eauto.
+              f_equal.
+              rewrite Hr_eq.
+              unfold Val.load_result.
+              specialize (Harm_reg_valid rs_init r).
+              destruct Harm_reg_valid as [(vi & Hrs_eq) | (b & o & Hrs_eq)];
+                rewrite Hrs_eq; reflexivity.
+            - (**r In r0 l *)
+              specialize (Hload r0 Hin).
+              rewrite <- Hload.
+              simpl.
+              rewrite Ptrofs.add_zero_l.
+              rewrite Hreg_mul4_unsigned.
+              erewrite Mem.load_store_other; eauto.
+              right.
 
-          intros r0 Hin.
-          simpl.
-          rewrite Ptrofs.add_zero_l.
-          rewrite Hreg_mul4_unsigned.
-          destruct Hin as [Hreg_eq | Hin].
-          { (**r r0 = r *)
-            subst r0.
-            erewrite Mem.load_store_same; eauto.
-            f_equal.
-            unfold Val.load_result.
-            destruct arm_inv_reg as (Harm_inv_reg0 & _).
-            clear - Harm_inv_reg0.
-            unfold arm_assume_register_map in *.
-            specialize (Harm_inv_reg0 r).
-            destruct (rs0 r); inversion Harm_inv_reg0; try reflexivity.
+              clear - Hlist_not_in Hcallee_save Harm_callee_save Hin.
+              specialize (Harm_callee_save r0 Hin).
+              assert (Hneq: r <> r0). {
+                intro HF.
+                subst r0.
+                apply Hlist_not_in.
+                assumption.
+              }
+              clear Hin Hlist_not_in.
+              change (size_chunk Mint32) with 4.
+              unfold arm_callee_save_regs in *.
+              unfold Z_of_ireg.
+              rename Harm_callee_save into Hr0.
+              rename Hcallee_save into Hr.
+              destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
+              { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
+                repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                inversion Hr.
+              }
+              destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
+              { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
+                repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                inversion Hr.
+              }
+              destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
+              { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
+                repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                inversion Hr.
+              }
+              destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
+              { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
+                repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                inversion Hr.
+              }
+              destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
+              { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
+                repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                inversion Hr.
+              }
+              destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
+              { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
+                repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                inversion Hr.
+              }
+              destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
+              { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
+                repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                inversion Hr.
+              }
+              destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
+              { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
+                repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
+                inversion Hr.
+              }
+              inversion Hr0.
           }
-          (**r In r0 l *)
-          specialize (Hstack r0 Hin).
-          rewrite <- Hstack.
+          (**r NoDup (r :: l) *)
+          rewrite NoDup_cons_iff.
+          split; assumption.
+
+        + (**r rs IR13 *)
+          rewrite Harm_pc.
+          rewrite Pregmap.gso; [| intros HF; inversion HF].
+          rewrite Hsp_blk in *.
+          split; [reflexivity |].
+          rewrite <- Harm_old_sp.
           simpl.
-          rewrite Ptrofs.add_zero_l.
-          rewrite Hreg_mul4_unsigned.
           erewrite Mem.load_store_other; eauto.
           right.
-
-          clear - Hlist_not_in Hcallee_save Harm_callee_save Hin.
-          specialize (Harm_callee_save r0 Hin).
-          assert (Hneq: r <> r0). {
-            intro HF.
-            subst r0.
-            apply Hlist_not_in.
-            assumption.
-          }
-          clear Hin Hlist_not_in.
+          change (Ptrofs.unsigned Ptrofs.zero) with 0.
           change (size_chunk Mint32) with 4.
-          unfold arm_callee_save_regs in *.
-          unfold ireg2nat.
-          rename Harm_callee_save into Hr0.
-          rename Hcallee_save into Hr.
-          destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
-          { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
-            repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            inversion Hr.
-          }
-          destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
-          { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
-            repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            inversion Hr.
-          }
-          destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
-          { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
-            repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            inversion Hr.
-          }
-          destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
-          { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
-            repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            inversion Hr.
-          }
-          destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
-          { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
-            repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            inversion Hr.
-          }
-          destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
-          { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
-            repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            inversion Hr.
-          }
-          destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
-          { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
-            repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            inversion Hr.
-          }
-          destruct Hr0 as [Hr0 | Hr0]; [subst r0 | ].
-          { repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            destruct Hr as [Hr | Hr]; [subst r; exfalso; apply Hneq; reflexivity | ];
-            repeat (destruct Hr as [Hr | Hr]; [subst r; lia | ]);
-            inversion Hr.
-          }
-          inversion Hr0.
+          clear - Hcallee_save.
+          unfold Z_of_ireg.
+          repeat (destruct Hcallee_save as [Hcallee_save | Hcallee_save]; [subst r; lia | ]).
+          inversion Hcallee_save.
 
         + (**r rs PC *)
-          rewrite HPC_eq.
           rewrite Pregmap.gss.
-          unfold Val.offset_ptr.
+          rewrite Harm_pc.
+          simpl.
           f_equal.
-          rewrite <- Hst0_eq in Hofs1.
-          rewrite Hofs1, Hofs0.
-          unfold Ptrofs.add.
-
-          unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hupd_spilling.
-          destruct upd_jitted_list eqn: Hupd; [| inversion Hupd_spilling].
-          erewrite upd_jitted_list_unsigned_repr; eauto.
-
-          f_equal.
-          change (Ptrofs.unsigned wsize) with 4.
-          lia.
+          unfold Ptrofs.add, wsize.
+          change (Ptrofs.unsigned (Ptrofs.repr 4)) with 4.
+          eapply add_ofs_4; eauto.
 
         + (**r Mem.valid_block *)
-          assumption.
-        + (**r Mem.unchanged_on *)
-          rewrite Pregmap.gso; [| intros HF; inversion HF].
-          eapply store_unchanged_on_3; eauto.
-          intros ofs2 HF.
-          destruct HF as (_ & HF).
-          rewrite Hsp_blk in HF.
-          unfold not_stack_blk in HF.
-          apply HF.
-          reflexivity.
+          clear Hsp_blk.
+          destruct Harm_valid_blk as (Ht & Hjit_blk & Hst_blk & Hsp_blk).
+          split; [assumption |].
+          repeat split; try (eapply Mem.store_valid_block_1; eauto).
+        + (**r Mem.range_perm *)
+          unfold Mem.range_perm in *.
+          clear - Harm_valid_blk Hst_blk_perm Hsp_blk_perm Hstore.
+          split; intros ofs Hofs; eapply Mem.perm_store_1; eauto.
 
-        + (**r Mem.unchanged_on *)
-          rewrite Pregmap.gso; [| intros HF; inversion HF].
-          eapply store_unchanged_on_4; eauto.
-          intros ofs2 HF.
-          destruct HF as (_ & HF).
-          rewrite Hsp_blk in HF.
-          unfold not_stack_blk in HF.
-          apply HF.
-          reflexivity.
+        + (**r arm_reg_valid *)
+          assumption.
       }
     Qed.
 
-    Lemma jit_spilling_simulation: forall l rbpf_st st0 st1 st_final rs0 ofs0 ofs1 m0
-      (Hpre: arm_registers_pre_weak rs0)
+    Lemma jit_spilling_simulation: forall l rbpf_st st0 st1 rs0 m0 ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
       (Hjit_spilling: jit_alu32_thumb_save l st0 = Some st1)
       (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
       (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
-      (Harm_blk: jitted_list st0 = Vptr jit_blk Ptrofs.zero)
-      (Hreg_blk: jit_regs st0 = Vptr regs_blk Ptrofs.zero)
-      (Hmem: sub_mem_blk (jit_mem st1) (jit_mem st_final) jit_blk ofs1)
-      (Harm_inv: arm_memory_inv0 st0 rs0 rs0 m0 m0
-        flag_blk regs_blk jit_blk jit_state_blk (fun b _ => not_stack_blk (rs0 IR13) b))
+      (Hsub_mem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
 
       (Hnodup: NoDup l)
       (Harm_callee_save: forall r, List.In r l -> List.In r arm_callee_save_regs)
 
-      (Harm: match_state_arm rbpf_st rs0 m0 rs0 [] l jit_blk ofs0 st_final),
+      (Hstack_unchanged: stack_unchanged [] rs0 rs0)
+      (Harm: match_state_arm rbpf_st rs0 rs0 m0 [] [] st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
         exists rs1 m1,
           arm_registers_spilling l rs0 rs1 m0 m1 /\
-          arm_registers_pre_weak rs1 /\
-          arm_memory_inv0 st1 rs0 rs1 m0 m1
-            flag_blk regs_blk jit_blk jit_state_blk (fun b _ => not_stack_blk (rs0 IR13) b) /\
+          rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          stack_unchanged l rs0 rs1 /\
           star BinSem.step ge (State rs0 m0) E0 (State rs1 m1) /\
-          match_state_arm rbpf_st rs1 m1 rs0 [] l jit_blk ofs1 st_final.
+          match_state_arm rbpf_st rs0 rs1 m1 [] l st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
     Proof.
       induction l; intros.
       { (**r l = [] *)
-        unfold arm_registers_spilling.
-        simpl.
+        simpl in *.
+        injection Hjit_spilling as Hst_eq.
+        subst st0.
         exists rs0.
         exists m0.
         split; [split; reflexivity | ].
         split; [assumption | ].
-        split.
-        { simpl in Hjit_spilling.
-          injection Hjit_spilling as Hst_eq.
-          subst st0.
-          assumption.
-        }
-        split;[constructor | ].
-        simpl in Hjit_spilling.
-        injection Hjit_spilling as Heq.
-        subst st1.
+        split; [assumption | ].
+        split; [ apply star_refl | ].
         rewrite <- Hofs0 in Hofs1.
         subst ofs1.
         assumption.
@@ -1140,151 +846,62 @@ Section JITProofWhole.
       destruct jit_alu32_thumb_upd_save eqn: Hone_spilling; [| inversion Hjit_spilling].
       rename j into stk.
 
-      eapply jit_spilling_one_simulation with (st_final := st_final)
-        (rbpf_st := rbpf_st) (rs0 := rs0) (l := l)
+      assert (Hle: (2 * jitted_len st0 <= JITTED_LIST_MAX_LENGTH)%nat). {
+        clear - Hone_spilling.
+        unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hone_spilling.
+        destruct upd_jitted_list eqn: Hupd; [| inversion Hone_spilling].
+        eapply upd_jitted_list_max in Hupd; eauto.
+        lia.
+      }
+      unfold JITTED_LIST_MAX_LENGTH in Hle.
+
+      eapply jit_spilling_one_simulation with
+        (rbpf_st := rbpf_st) (rs0 := rs0) (l := []) (old_sp := old_sp) (sp_blk := sp_blk)
         (ofs0 := ofs0) (ofs1 := Z.of_nat (2 * jitted_len stk)) (m0 := m0)
         in Hone_spilling as Hone; eauto.
 
       - (**r MAIN *)
-        destruct Hone as (rsk & mk & Harm_registers_spilling_one & Hrs_eq & Hpre_rs1 & Harm_memory_inv0 & Hsemk & Hmatch_armk).
+        destruct Hone as (rsk & mk & Harm_registers_spilling_one & Hrs_eq & Hpre_rs1 & Hstack_unchangedk & Hsemk & Hmatch_armk).
         rewrite Harm_registers_spilling_one.
         unfold arm_registers_spilling in IHl.
 
-        specialize (IHl rbpf_st stk st1 st_final
-          (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)) (Z.of_nat (2 * jitted_len stk)) ofs1 mk).
+        specialize (IHl rbpf_st stk st1
+          (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)) mk
+          (Z.of_nat (2 * jitted_len stk)) ofs1 st_blk jit_blk sp_blk ra_blk old_sp).
 
-        assert (Hpre_cond: arm_registers_pre_weak rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)). {
-          clear - Hpre.
-          unfold arm_registers_pre_weak in *.
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          assumption.
-        }
-        specialize (IHl Hpre_cond Hjit_spilling); clear Hpre_cond.
+        specialize (IHl Hjit_spilling).
 
         assert (Heq: Z.of_nat (2 * jitted_len stk) = Z.of_nat (2 * jitted_len stk)) by reflexivity.
         specialize (IHl Heq Hofs1); clear Heq.
 
+        assert (Heq: sub_mem_blk (jit_mem st1) mk jit_blk (Z.of_nat (2 * jitted_len stk)) ofs1). {
+          clear - Hone_spilling Hjit_spilling Hofs0 Hofs1 Hsub_mem Harm Harm_registers_spilling_one.
+          unfold sub_mem_blk in *.
+          intros chunk ofs Hofs.
+          erewrite Hsub_mem.
+          - unfold arm_registers_spilling_one in Harm_registers_spilling_one.
+            destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
+            rewrite Hsp_blk in *.
+            simpl in Harm_registers_spilling_one.
+            symmetry.
+            erewrite Mem.load_store_other; eauto.
+            left.
+            clear- Harm_valid_blk; destruct Harm_valid_blk as (Harm_valid_blk & _); intuition.
+          - split; [| lia].
+            unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hone_spilling.
+            eapply upd_jitted_list_jittted_len_2 in Hone_spilling; eauto.
+            lia.
+        }
+        specialize (IHl Heq); clear Heq.
+
+        unfold rbpf_state_inv in *.
         assert (Heq: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
-          clear - old_sp Hone_spilling Harm_blk.
+          clear - Hjit_inv Hone_spilling.
           unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hone_spilling.
           eapply upd_jitted_list_unchange_jittted_list_2 in Hone_spilling.
           rewrite <- Hone_spilling.
           assumption.
-        }
-        specialize (IHl Heq); clear Heq.
-
-        assert (Heq: jit_regs stk = Vptr regs_blk Ptrofs.zero). {
-          clear - old_sp Hone_spilling Hreg_blk.
-          unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hone_spilling.
-          eapply upd_jitted_list_unchange_jit_regs_2 in Hone_spilling.
-          rewrite <- Hone_spilling.
-          assumption.
-        }
-        specialize (IHl Heq Hmem); clear Heq.
-
-        assert (Heq: arm_memory_inv0 stk rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)
-                      rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) mk mk
-                      flag_blk regs_blk jit_blk jit_state_blk
-                        (fun b _ => not_stack_blk (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) IR13) b)). {
-          clear - Harm_registers_spilling_one Hone_spilling Harm_blk Hreg_blk Harm_inv.
-          destruct Harm_inv.
-
-          destruct arm_inv_stk as (_ & arm_inv_stk0).
-          unfold arm_stack_pointer_spec in *.
-          destruct arm_inv_stk0 as (sp_blk & Heq & (Hneq0 & Hneq1 & Hneq2 & Hneq3) & Hneq4 & Hperm).
-
-          unfold arm_registers_spilling_one in *.
-          rewrite Heq in Harm_registers_spilling_one.
-          simpl in Harm_registers_spilling_one.
-          rewrite Ptrofs.add_zero_l in Harm_registers_spilling_one.
-
-          split.
-          - (**r arm_inv_stk *)
-            split; [reflexivity | ].
-            exists sp_blk.
-            split.
-            + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-              assumption.
-            + split.
-              { repeat (split; [assumption | ]).
-                assumption.
-              }
-              split; [assumption | ].
-              clear - Harm_registers_spilling_one Heq Harm_blk Hperm.
-
-              unfold Mem.range_perm in *.
-              intros ofs Hrange.
-              specialize (Hperm ofs Hrange).
-              eapply Mem.perm_store_1; eauto.
-          - (**r arm_inv_reg *)
-            destruct arm_inv_reg as (Harm_inv_reg0 & _ & Hrange_perm).
-            split.
-            { unfold arm_assume_register_map.
-              unfold arm_assume_register_map in Harm_inv_reg0.
-              intros r.
-              specialize (Harm_inv_reg0 r).
-              destruct r.
-              + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-                destruct i; try (rewrite Pregmap.gss; auto);
-                  try (rewrite Pregmap.gso; [ | intros HF; inversion HF]); try assumption.
-              + repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              + repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              + rewrite Pregmap.gss; auto.
-                unfold Val.offset_ptr; destruct (rs0 PC); auto.
-            }
-            split.
-            { unfold arm_assume_register_map.
-              unfold arm_assume_register_map in Harm_inv_reg0.
-              intros r.
-              specialize (Harm_inv_reg0 r).
-              destruct r.
-              + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-                destruct i; try (rewrite Pregmap.gss; auto);
-                  try (rewrite Pregmap.gso; [ | intros HF; inversion HF]); try assumption.
-              + repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              + repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              + rewrite Pregmap.gss; auto.
-                unfold Val.offset_ptr; destruct (rs0 PC); auto.
-            }
-            unfold Mem.range_perm in *.
-            intros ofs Hrange.
-            specialize (Hrange_perm ofs Hrange).
-            eapply Mem.perm_store_1; eauto.
-          - (**r jit_state_memory_layout *)
-            unfold jit_state_memory_layout in *.
-            destruct arm_inv_st as (arm_inv_st0 & arm_inv_st1).
-            split.
-            + rewrite <- arm_inv_st0.
-              eapply Mem.load_store_other; eauto.
-            + unfold regs_layout in *.
-              intros r.
-              specialize (arm_inv_st1 r).
-              destruct arm_inv_st1 as (vi & Hreg & Hload0 & Hload1 & Hreg_eq).
-              exists vi.
-              split.
-              * rewrite <- Hreg.
-                symmetry.
-                unfold jit_alu32_thumb_upd_save in Hone_spilling.
-                unfold jit_alu32_thumb_load_store_template_jit in Hone_spilling.
-                eapply upd_jitted_list_unchange_eval_jit_reg_2
-                  with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-                (**r jit_regs st0 = Vptr regs_blk Ptrofs.zero *)
-                clear - Hneq4; unfold block_neq in Hneq4.
-                intuition.
-              * rewrite <- Hload0.
-                split; [eapply Mem.load_store_other; eauto | ].
-                rewrite <- Hload1.
-                split; [eapply Mem.load_store_other; eauto | ].
-
-                intros vj Heval_reg0.
-                apply Hreg_eq.
-                rewrite <- Heval_reg0.
-                eapply upd_jitted_list_unchange_eval_jit_reg_2
-                  with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-                clear - Hneq4; unfold block_neq in Hneq4.
-                intuition.
-          - (**r Mem.extends *)
-            apply Mem.unchanged_on_refl.
         }
         specialize (IHl Heq); clear Heq.
 
@@ -1304,503 +921,212 @@ Section JITProofWhole.
         }
         specialize (IHl Heq); clear Heq.
 
-        assert (Heq: match_state_arm rbpf_st rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) mk
-                      rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) [] l jit_blk
-                      (Z.of_nat (2 * jitted_len stk)) st_final). {
-          clear - Hone_spilling Harm Harm_callee_save Harm_registers_spilling_one Harm_memory_inv0 Hnodup Hofs0.
-
-          eapply exec_step.
-          - (**r regs_agree *)
-            unfold regs_agree in *.
-            intros r Hin.
-            inversion Hin.
-          - (**r arm_synch_stack *)
-            destruct Harm_memory_inv0.
-            destruct arm_inv_stk as (Hrs0_eq & Hsp_spec).
-            unfold arm_stack_pointer_spec in Hsp_spec.
-            destruct Hsp_spec as (sp_blk & Hrs13_eq & Hneq).
-
-            set (rs := rs0).
-            assert (Heq: match_state_arm rbpf_st rs0 m0 rs [] (a :: l) jit_blk ofs0 st_final). {
-              subst rs.
-              assumption.
-            }
-            assert (Heq1: rs = rs0) by auto.
-            set (tl := a :: l).
-            assert (Heq2: tl = a :: l) by auto.
-            rewrite <- Heq2 in *.
-            destruct Heq.
-            subst rs lsr_stack.
-
-            rename old_rs into rs0.
-
-            unfold arm_synch_stack in *.
-            destruct Hstack as (Hstack0 & Hstack1).
-            rewrite Pregmap.gso; [ | intros HF; inversion HF].
-
-            split.
-            +
-              unfold arm_registers_spilling_one in Harm_registers_spilling_one.
-              rewrite Hrs13_eq in *.
-              rewrite <- Hstack0.
-              simpl.
-              clear - Harm_callee_save Harm_registers_spilling_one Hneq.
-              simpl in Harm_registers_spilling_one.
-              eapply Mem.load_store_other; eauto.
-              right. left. (**r here we need the ireg is a callee-save register *)
-
-              specialize (Harm_callee_save a).
-              assert (Heq: In a (a :: l)).  {
-                simpl.
-                left; reflexivity.
-              }
-
-              specialize (Harm_callee_save Heq); clear Heq.
-              clear - Harm_callee_save.
-              unfold arm_callee_save_regs in Harm_callee_save.
-              rewrite Ptrofs.add_zero_l.
-              change (Ptrofs.unsigned Ptrofs.zero) with 0.
-              change (0 + size_chunk Mint32) with 4.
-              rewrite Hreg_mul4_unsigned.
-              unfold ireg2nat; destruct a; try lia.
-              rename Harm_callee_save into HF.
-              do 8 (destruct HF as [HF | HF]; [inversion HF | ]).
-              inversion HF.
-
-            + intros r.
-              specialize (Hstack1 r). (*
-              destruct Hstack1 as (Hstack1 & Hstack2). *)
-
-              rewrite Pregmap.gso; [ | intros HF; inversion HF].
-
-              intro Hin.
-
-              assert (Heq: In r (a :: l)) by (simpl; right; assumption).
-              specialize (Hstack1 Heq); clear Heq.
-
-              unfold arm_registers_spilling_one in Harm_registers_spilling_one.
-              rewrite Hrs13_eq in *.
-              rewrite <- Hstack1.
-              simpl.
-              simpl in Harm_registers_spilling_one.
-              rewrite Ptrofs.add_zero_l in *.
-              eapply Mem.load_store_other; eauto.
-              right.
-              rewrite Hreg_mul4_unsigned.
-
-              (**r here we need to know r <> a because of NoDup (a :: l) *)
-              assert (Heq: In r (a :: l)) by (simpl; right; assumption).
-              specialize (Harm_callee_save r Heq) as Hr_range.
-              assert (Hneq_reg: r <> a). {
-                rewrite NoDup_cons_iff in Hnodup.
-                destruct Hnodup as (Hnin & _).
-                intro HF.
-                apply Hnin.
-                subst r; assumption.
-              }
-              clear Heq.
-              assert (Heq: In a (a :: l)) by (simpl; left; reflexivity).
-              specialize (Harm_callee_save a Heq) as Ha_range; clear Heq.
-              rewrite Hreg_mul4_unsigned.
-              change (size_chunk Mint32) with 4.
-              clear - Hneq_reg Hr_range Ha_range.
-              unfold ireg2nat.
-              unfold arm_callee_save_regs, In in *.
-              destruct Hr_range as [Hr_range | Hr_range].
-              { subst r.
-                destruct Ha_range as [Ha_range | Ha_range].
-                { subst a. exfalso. apply Hneq_reg; reflexivity. }
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                inversion Ha_range.
-              }
-
-              destruct Hr_range as [Hr_range | Hr_range].
-              { subst r.
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                destruct Ha_range as [Ha_range | Ha_range].
-                { subst a. exfalso. apply Hneq_reg; reflexivity. }
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                inversion Ha_range.
-              }
-
-              destruct Hr_range as [Hr_range | Hr_range].
-              { subst r.
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                destruct Ha_range as [Ha_range | Ha_range].
-                { subst a. exfalso. apply Hneq_reg; reflexivity. }
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                inversion Ha_range.
-              }
-
-              destruct Hr_range as [Hr_range | Hr_range].
-              { subst r.
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                destruct Ha_range as [Ha_range | Ha_range].
-                { subst a. exfalso. apply Hneq_reg; reflexivity. }
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                inversion Ha_range.
-              }
-
-              destruct Hr_range as [Hr_range | Hr_range].
-              { subst r.
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                destruct Ha_range as [Ha_range | Ha_range].
-                { subst a. exfalso. apply Hneq_reg; reflexivity. }
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                inversion Ha_range.
-              }
-
-              destruct Hr_range as [Hr_range | Hr_range].
-              { subst r.
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                destruct Ha_range as [Ha_range | Ha_range].
-                { subst a. exfalso. apply Hneq_reg; reflexivity. }
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                inversion Ha_range.
-              }
-
-              destruct Hr_range as [Hr_range | Hr_range].
-              { subst r.
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                destruct Ha_range as [Ha_range | Ha_range].
-                { subst a. exfalso. apply Hneq_reg; reflexivity. }
-                destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | inversion Ha_range].
-              }
-
-              destruct Hr_range as [Hr_range | Hr_range].
-              { subst r.
-                repeat (destruct Ha_range as [Ha_range | Ha_range]; [ subst a; lia | ]).
-                destruct Ha_range as [Ha_range | Ha_range].
-                { subst a. exfalso. apply Hneq_reg; reflexivity. }
-                inversion Ha_range.
-              }
-
-              inversion Hr_range.
-          - (**r rs PC *)
-            rewrite  Pregmap.gss.
-
-            (**r TODO: currently, we have to use this way to destruct an inductive semantics in Coq *)
-            destruct Harm_memory_inv0.
-            destruct arm_inv_stk as (Hrs0_eq & Hsp_spec).
-            unfold arm_stack_pointer_spec in Hsp_spec.
-            destruct Hsp_spec as (sp_blk & Hrs13_eq & Hneq).
-
-            set (rs := rs0).
-            assert (Heq: match_state_arm rbpf_st rs0 m0 rs [] (a :: l) jit_blk ofs0 st_final) by auto.
-            assert (Heq1: rs = rs0) by auto.
-            set (tl := a :: l).
-            assert (Heq2: tl = a :: l) by auto.
-            rewrite <- Heq2 in *.
-            destruct Heq.
-            subst rs lsr_stack.
-
-            rename old_rs into rs0.
-
-            rewrite HPC_eq, Hofs0.
-
-            unfold Val.offset_ptr.
-            f_equal.
-            unfold Ptrofs.add, wsize.
-            change (Ptrofs.unsigned (Ptrofs.repr 4)) with 4.
-            f_equal.
-
-            clear - Hone_spilling.
-            unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in *.
-            eapply upd_jitted_list_jittted_len_2 in Hone_spilling as Heq.
-            rewrite <- Heq.
-
-            destruct upd_jitted_list eqn: Hupd; [| inversion Hone_spilling].
-            apply upd_jitted_list_max in Hupd.
-            unfold JITTED_LIST_MAX_LENGTH in Hupd.
-            rewrite Ptrofs.unsigned_repr; [lia | ].
-            change Ptrofs.max_unsigned with 4294967295; lia.
-          - (**r Mem.valid_block *)
-            destruct Harm_memory_inv0.
-            destruct Harm.
-            assumption.
-          - (**r Mem.unchanged_on *)
-            destruct Harm_memory_inv0.
-
-            set (rs := rs0).
-            assert (Heq: match_state_arm rbpf_st rs0 m0 rs [] (a :: l) jit_blk ofs0 st_final) by auto.
-            assert (Heq1: rs = rs0) by auto.
-            set (tl := a :: l).
-            assert (Heq2: tl = a :: l) by auto.
-            rewrite <- Heq2 in *.
-            destruct Heq.
-            subst old_rs lsr_stack.
-
-            rename rs into rs0.
-            rewrite HPC_eq.
-            rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            apply Mem.unchanged_on_trans with (m2 := arm_mem0); auto.
-            clear - arm_inv_stk arm_mem.
-            eapply Mem.unchanged_on_implies; eauto.
-            intros.
-            simpl.
-            destruct arm_inv_stk as (_ & Hsp_spec).
-            unfold arm_stack_pointer_spec in Hsp_spec.
-            destruct Hsp_spec as (sp_blk & Hrs_eq & Hneq).
-            intuition.
-          - (**r Mem.unchanged_on *)
-            rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            destruct Harm_memory_inv0.
-
-            set (rs := rs0).
-            assert (Heq: match_state_arm rbpf_st rs0 m0 rs [] (a :: l) jit_blk ofs0 st_final) by auto.
-            assert (Heq1: rs = rs0) by auto.
-            set (tl := a :: l).
-            assert (Heq2: tl = a :: l) by auto.
-            rewrite <- Heq2 in *.
-            destruct Heq.
-            subst old_rs lsr_stack.
-
-            rename rs into rs0.
-            rename arm_mem0 into m0.
-            clear - arm_inv_stk Harm_registers_spilling_one Harm_mem2.
-            unfold arm_registers_spilling_one in Harm_registers_spilling_one.
-            destruct arm_inv_stk as (_ & Hsp_spec).
-            unfold arm_stack_pointer_spec in Hsp_spec.
-            destruct Hsp_spec as (sp_blk & Hrs_eq & Hneq).
-            rewrite Hrs_eq in *.
-            simpl in Harm_registers_spilling_one.
-            rewrite Ptrofs.add_zero_l in Harm_registers_spilling_one.
-            rewrite Hreg_mul4_unsigned in Harm_registers_spilling_one.
-            eapply store_unchanged_on_4; eauto.
-            intros.
-            intro HF.
-            simpl in HF.
-            destruct HF as (_ & HF).
-            apply HF.
-            reflexivity.
+        assert (Heq: stack_unchanged [] rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) rs0 # 
+          PC <- (Val.offset_ptr (rs0 PC) wsize)). {
+          unfold stack_unchanged in *.
+          intros r Hin.
+          f_equal.
         }
         specialize (IHl Heq); clear Heq.
 
-        destruct IHl as (rs1 & m1 & Haux & Hpre_rs & Harm_memory_inv1 & Hsem1 & Hmatch_arm1).
+        assert (Heq: match_state_arm rbpf_st rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)
+                      rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) mk [] [] st_blk jit_blk sp_blk ra_blk
+                      (Z.of_nat (2 * jitted_len stk)) old_sp). {
+          clear - Hone_spilling Harm Harm_callee_save Harm_registers_spilling_one Hnodup Hofs0 Hle.
+          destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
+
+          unfold arm_registers_spilling_one in Harm_registers_spilling_one.
+          rewrite Hsp_blk in *.
+          simpl in Harm_registers_spilling_one.
+          rewrite Ptrofs.add_zero_l in Harm_registers_spilling_one.
+          rewrite Hreg_mul4_unsigned in Harm_registers_spilling_one.
+
+          constructor; try assumption.
+          - (**r regs_unchanged *)
+            unfold regs_unchanged in *.
+            intros r HT.
+            specialize (Harm_reg_same _ HT).
+            destruct Harm_reg_same as (vi & Hload1 & Hload2).
+            exists vi.
+            split; [assumption |].
+            rewrite <- Hload2.
+            eapply Mem.load_store_other; eauto.
+            left. intuition.
+          - (**r arm_synch_stack *)
+            unfold arm_synch_stack in *.
+            split; [| apply NoDup_nil].
+            intros r Hin; inversion Hin.
+          - (**r rs0 IR13 *)
+            rewrite Pregmap.gso; [ | intros HF; inversion HF].
+            split; [assumption | ].
+            rewrite <- Harm_old_sp.
+            rewrite Hsp_blk in *.
+            simpl.
+            eapply Mem.load_store_other; eauto.
+            right.
+            change (Ptrofs.unsigned Ptrofs.zero) with 0.
+            change (size_chunk Mint32) with 4.
+
+            specialize (Harm_callee_save a).
+            assert (Heq: In a (a :: l)).  {
+              simpl.
+              left; reflexivity.
+            }
+
+            specialize (Harm_callee_save Heq); clear Heq.
+            clear - Harm_callee_save.
+            unfold arm_callee_save_regs in Harm_callee_save.
+            unfold Z_of_ireg; destruct a; try lia.
+            rename Harm_callee_save into HF.
+            do 8 (destruct HF as [HF | HF]; [inversion HF | ]).
+            inversion HF.
+          - (**r rs PC *)
+            rewrite  Pregmap.gss.
+            unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hone_spilling.
+            rewrite Harm_pc.
+            unfold Val.offset_ptr, wsize.
+            f_equal.
+            eapply upd_jitted_list_jittted_len_2 in Hone_spilling as Heq; eauto.
+            rewrite <- Heq.
+            erewrite add_ofs_4; eauto.
+
+          - (**r Mem.valid_block *)
+            clear Hsp_blk.
+            destruct Harm_valid_blk as (Ht & Hjit_blk & Hst_blk & Hsp_blk).
+            split; [assumption |].
+            repeat split; try (eapply Mem.store_valid_block_1; eauto).
+          - (**r Mem.range_perm *)
+            unfold Mem.range_perm in *.
+            clear - Harm_valid_blk Hst_blk_perm Hsp_blk_perm Harm_registers_spilling_one.
+            split; intros ofs Hofs; eapply Mem.perm_store_1; eauto.
+        }
+        specialize (IHl Heq); clear Heq.
+
+        assert (Hpre_cond: rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) IR12 = Vptr st_blk Ptrofs.zero). {
+          clear - Hpre_rs1 Hrs_eq.
+          rewrite <- Hpre_rs1.
+          rewrite Hrs_eq.
+          reflexivity.
+        }
+        specialize (IHl Hpre_cond); clear Hpre_cond.
+
+        destruct IHl as (rs1 & m1 & Haux & Hpre_rs & Hstack_unchanged1 & Hsem1 & Hmatch_arm1).
         exists rs1, m1.
         rewrite <- Hrs_eq in *.
         split; [assumption | ].
         split; [assumption | ].
-
-        assert (Heq0: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
-          clear - old_sp Hone_spilling Harm_blk.
-          unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hone_spilling.
-          eapply upd_jitted_list_unchange_jittted_list_2 in Hone_spilling.
-          rewrite <- Hone_spilling.
-          assumption.
-        }
-
-        assert (Heq1: jit_regs stk = Vptr regs_blk Ptrofs.zero). {
-          clear - old_sp Hone_spilling Hreg_blk.
-          unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hone_spilling.
-          eapply upd_jitted_list_unchange_jit_regs_2 in Hone_spilling.
-          rewrite <- Hone_spilling.
-          assumption.
-        }
-
         split.
-        + (**r arm_memory_inv0 *)
-          clear - Harm_memory_inv1 Harm_memory_inv0 Hrs_eq Harm_registers_spilling_one
-                  Hone_spilling Hjit_spilling Harm_blk Hreg_blk Heq0 Heq1.
-          destruct Harm_memory_inv1.
-          destruct Harm_memory_inv0.
-          destruct arm_inv_stk as (Hrs_eqk & arm_inv_stk).
-          destruct arm_inv_stk0 as (Hes_eq1 & arm_inv_stk0).
-          destruct arm_inv_reg as (Hassumek & Hassume1 & Hrange_permk).
-          destruct arm_inv_reg0 as (Hassume0 & _ & Hrange_perm0).
-          constructor; try assumption.
-          * (**r arm_stack_pointer_spec*)
-            split; [rewrite Hes_eq1; assumption | assumption].
-          * (**r arm_assume_register_map *)
-            split;[assumption | ].
-            split; assumption.
-          * (**r jit_state_memory_layout *)
-            unfold jit_state_memory_layout in *.
-            destruct arm_inv_st0 as (arm_inv_st0 & arm_inv_st1).
-            split; [assumption | ].
-            unfold regs_layout in *.
-            intros r.
-            specialize (arm_inv_st1 r).
-            destruct arm_inv_st1 as (vi & Hreg & Hload0 & Hload1 & Hreg_eq).
-            exists vi.
-            split.
-            { rewrite <- Hreg.
-              symmetry.
-              eapply jit_alu32_thumb_save_unchange_eval_jit_reg
-                with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
+        {
+          (**r stack_unchanged *)
+          unfold stack_unchanged in *.
+          intros r Hin.
+          destruct Hin as (Hin1 & Hin).
+          erewrite <- Hstack_unchanged1; eauto.
+          2:{
+            split; [| assumption].
+            intros HF; apply Hin1.
+            right; assumption.
+          }
+          erewrite <- Hstack_unchangedk; eauto.
+          split; [| assumption].
+          intros HF; apply Hin1.
+          left.
+          destruct HF as [Heq| HF]; [| inversion HF].
+          assumption.
+        }
 
-              unfold arm_stack_pointer_spec in arm_inv_stk0.
-              destruct arm_inv_stk0 as (sp_blk & _ & _ & Hneq & _ ).
-              clear - Hneq; unfold block_neq in Hneq.
-              intuition.
-            }
-            split;[assumption | ].
-            split;[assumption | ].
-            intros vj Heval_reg0.
-            apply Hreg_eq.
-            rewrite <- Heval_reg0.
-            eapply jit_alu32_thumb_save_unchange_eval_jit_reg
-              with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
+        split; [ (**r star BinSem.step *) eapply star_trans; eauto | ].
 
-            unfold arm_stack_pointer_spec in arm_inv_stk0.
-            destruct arm_inv_stk0 as (sp_blk & _ & _ & Hneq & _ ).
-            clear - Hneq; unfold block_neq in Hneq.
-            intuition.
-          * (**r Mem.unchanged_on *)
-            rewrite <- Hes_eq1 in arm_mem.
-            eapply Mem.unchanged_on_trans; eauto.
-        + split.
-          * (**r star BinSem.step *)
-            eapply star_trans; eauto.
-          * (**r match_state_arm *)
-            destruct Harm_memory_inv1.
-            clear - flag_blk regs_blk jit_blk jit_state_blk arm_inv_stk Hnodup Haux Hmatch_arm1 Hmatch_armk Hrs_eq
-              Hone_spilling Hjit_spilling Hofs0 Hofs1 Harm_registers_spilling_one Harm_callee_save.
+        (**r match_state_arm *)
+        destruct arm_registers_spilling_aux eqn: Hspilling_n; [| inversion Haux].
+        destruct p.
+        destruct Haux as (Haux_rs & Haux_m).
+        subst r m.
 
-            destruct arm_registers_spilling_aux eqn: Hspilling_n; [| inversion Haux].
-            destruct p.
-            destruct Haux as (Haux_rs & Haux_m).
-            subst r m.
+        destruct Hmatch_arm1 as (Hra_blk1, Harm_reg_syn1, Harm_reg_same1, Harm_stack_syn1, (Hsp_blk1 & Harm_old_sp1),
+              Harm_pc1, Harm_valid_blk1, (Hst_blk_perm1 & Hsp_blk_perm1), Harm_reg_valid1).
 
-            set (el := []).
-            assert (Heq1: el = []) by auto.
-            rewrite <- Heq1 in *.
+        destruct Hmatch_armk as (Har_blkk, Harm_reg_synk, Harm_reg_samek, Harm_stack_synk, (Hsp_blkk & Harm_old_spk),
+              Harm_pck, Harm_valid_blkk, (Hst_blk_permk & Hsp_blk_permk), Harm_reg_validk).
 
-            set (jit_blk' := jit_blk).
-            assert (Heq4: jit_blk' = jit_blk) by auto.
-            rewrite <- Heq4 in *.
+        constructor; try assumption.
+        + (**r arm_synch_stack *)
+          unfold arm_synch_stack in *.
+          destruct Harm_stack_syn1 as (Harm_stack_syn1 & _).
+          destruct Harm_stack_synk as (Harm_stack_synk & _).
+          split; [ | assumption].
+          intros r Hin.
 
-            destruct Hmatch_arm1.
-            rename lsr_stack into l.
+          destruct Hin as [Hreg_eq | Hin].
+          { subst a.
 
-            (**r TODO: currently, we have to use this way to destruct an inductive semantics in Coq *)
-            set (tl := a :: l).
-            assert (Heq2: tl = a :: l) by auto.
-            rewrite <- Heq2 in *.
-            set (ofsk := Z.of_nat (2 * jitted_len stk)).
-            assert (Heq3: ofsk = Z.of_nat (2 * jitted_len stk)) by auto.
-            rewrite <- Heq3 in *.
-
-            destruct Hmatch_armk.
-            subst lsr lsr_stack ofs1.
-            rename ofs into ofs1.
-
-            rename arm_mem0 into mk.
-            rename arm_mem into m1.
-            rename rs into rs1.
-            rename rs0 into rsk.
-            rename old_rs into rs0.
-
-            constructor; try assumption.
-
-            (**r arm_synch_stack *)
-            unfold arm_synch_stack in *.
-            destruct Hstack as (Hstack & Hstack1).
-            destruct Hstack0 as (Hstack0 & Hstack2).
-            split; [assumption | ].
-            intros r Hin.
-            specialize (Hstack2 r Hin).
+            assert (Hin: In r [r]) by (left; reflexivity).
+            specialize (Harm_stack_synk r Hin); clear Hin.
             assert (Heq: rs0 r = rsk r). {
               rewrite Hrs_eq.
               rewrite Pregmap.gso; [ reflexivity | intros HF; inversion HF].
             }
             rewrite Heq in *; clear Heq.
 
-            destruct Hin as [Hreg_eq | Hin].
-            { subst a.
-              rewrite NoDup_cons_iff in Hnodup.
-              destruct Hnodup as (Hnin & Hnodup).
-              destruct arm_inv_stk as (Hrsk_eq & Hsp_spec).
-              unfold arm_stack_pointer_spec in Hsp_spec.
-              destruct Hsp_spec as (sp_blk & Hrsk_ptr & (Hneq0 & Hneq1 & Hneq2 & Hneq3) & Hneq4 & Hperm).
-              rewrite <- Hrsk_eq.
+            rewrite NoDup_cons_iff in Hnodup.
+            destruct Hnodup as (Hnin & Hnodup).
+            rewrite Hsp_blk1, Hsp_blkk in *.
+            simpl.
+            simpl in Harm_stack_synk.
+            rewrite Ptrofs.add_zero_l in *.
+            repeat rewrite Hreg_mul4_unsigned in *.
 
-              eapply arm_registers_spilling_aux_load_same with (rs0 := rsk) (rs1:= rs1); eauto.
-              + intros r0 Hr0_in.
-                apply Harm_callee_save.
-                right; assumption.
-              + apply Harm_callee_save; left; reflexivity.
-              + unfold arm_stack_pointer_spec.
-                exists sp_blk.
-                subst arm_blk.
-                split; [assumption | ].
-                split.
-                { repeat (split; [assumption | ]).
-                  assumption.
-                }
-                split; assumption.
-            }
-            apply Hstack1; auto.
+            eapply arm_registers_spilling_aux_load_same with (rs0 := rsk) (rs1:= rs1); eauto.
+            + intros r0 Hr0_in.
+              apply Harm_callee_save.
+              right; assumption.
+            + apply Harm_callee_save; left; reflexivity.
+          }
 
-      - (**r ~ In *)
-        rewrite NoDup_cons_iff in Hnodup.
-        destruct Hnodup as (Hnin & _).
-        assumption.
-      - (**r arm_callee_save_regs *)
+          specialize (Harm_stack_syn1 r Hin).
+          assert (Heq: rs0 r = rsk r). {
+            rewrite Hrs_eq.
+            rewrite Pregmap.gso; [ reflexivity | intros HF; inversion HF].
+          }
+          rewrite Heq in *; clear Heq.
+          apply Harm_stack_syn1; auto.
+        + (**r rs1 IR13 *)
+          split; assumption.
+        + (**r Mem.range_perm *)
+          split; assumption.
+
+      - (**r In a arm_callee_save_regs *)
         apply Harm_callee_save; left; reflexivity.
       - (**r arm_callee_save_regs *)
-        intros.
-        apply Harm_callee_save.
-        right; assumption.
+        intros r HF.
+        inversion HF.
       - (**r sub_mem_blk *)
-        unfold sub_mem_blk in Hmem.
+        unfold sub_mem_blk in Hsub_mem.
         unfold sub_mem_blk.
         intros chunk ofs2 Hrange.
-        specialize (Hmem chunk ofs2).
-        assert (Heq: 0 <= ofs2 /\ ofs2 + size_chunk chunk <= ofs1). {
+        specialize (Hsub_mem chunk ofs2).
+        assert (Heq: ofs0 <= ofs2 /\ ofs2 + size_chunk chunk <= ofs1). {
           assert (Heq: (jitted_len stk <= jitted_len st1)%nat). {
             eapply jit_alu32_thumb_save_jitted_len_leb; eauto.
           }
           lia.
         }
-        specialize (Hmem Heq); clear Heq.
+        specialize (Hsub_mem Heq); clear Heq.
 
-        rewrite <- Hmem.
+        rewrite <- Hsub_mem.
 
         eapply jit_alu32_thumb_save_load_same; eauto.
         unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hone_spilling.
         eapply upd_jitted_list_unchange_jittted_list_2 in Hone_spilling; eauto.
         rewrite <- Hone_spilling; assumption.
-      - (**r match_state_arm *)
-
-        set (rs := rs0).
-        assert (Heq: match_state_arm rbpf_st rs0 m0 rs [] (a :: l) jit_blk ofs0 st_final). {
-          subst rs.
-          assumption.
-        }
-        assert (Heq0: rs = rs0) by auto.
-        set (el := []).
-        assert (Heq1: el = []) by auto.
-        rewrite <- Heq1 in *.
-
-        set (jit_blk' := jit_blk).
-        assert (Heq4: jit_blk' = jit_blk) by auto.
-        rewrite <- Heq4 in *.
-
-        set (tl := a :: l).
-        assert (Heq2: tl = a :: l) by auto.
-        rewrite <- Heq2 in *.
-
-        destruct Heq.
-        subst lsr lsr_stack arm_blk old_rs.
-        rename ofs into ofs0.
-        rename arm_mem into m0.
-        rename rs into rs0.
-
-        constructor; try assumption.
-        (**r arm_synch_stack *)
-        unfold arm_synch_stack in *.
-        destruct Hstack as (Hstack & Hstack1).
-        split; [assumption | ].
-        intros r Hin.
-        apply Hstack1.
-        right; assumption.
+        lia.
     Qed.
 
   End JITSpilling.
 
   Section JITLoad.
-
+(*
     Lemma upd_jitted_list_unchange_match_state_jit:
       forall rbpf_st st0 st1 v
       (Hst: match_state_jit rbpf_st st0)
@@ -2028,13 +1354,14 @@ Section JITProofWhole.
       eapply upd_jitted_list_unchange_jittted_list in Hupd; eauto.
       rewrite <- Hupd.
       assumption.
-    Qed.
+    Qed. *)
 
     Definition arm_registers_load_one (r: reg) (rs0: Asm.regset) (v: int): Asm.regset :=
       (rs0 # (ireg_of_reg r) <- (Vint v)) # PC <-
                     (Val.offset_ptr (rs0 # (ireg_of_reg r) <- (Vint v) PC) wsize).
 
-    Fixpoint arm_registers_load_aux (l: list reg) (rbpf_st: state) (rs0: Asm.regset): option Asm.regset :=
+    Fixpoint arm_registers_load_aux (l: list reg) 
+      (rbpf_st: state) (rs0: Asm.regset): option Asm.regset :=
       match l with
       | [] => Some rs0
       | hd :: tl =>
@@ -2080,136 +1407,51 @@ Section JITProofWhole.
         apply ireg_of_reg_eq; auto.
     Qed.
 
-
-    Lemma jit_load_one_simulation: forall r l l1 v rbpf_st st0 st1 st_final old_rs rs0 ofs0 ofs1 m0
-      (Hpre: arm_registers_pre_weak rs0)
+    Lemma jit_load_one_simulation: forall r l v ls rbpf_st st0 st1 rs_init rs0 m0
+      ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
       (Hupd_load : jit_alu32_thumb_upd_load r st0 = Some st1)
 
       (Hlist_not_in: ~ List.In r l)
-      (Harm_inv: arm_memory_inv0 st0 rs0 rs0 m0 m0
-        flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True))
+      (Hlist_not_in1: forall r0, ~List.In r0 ls /\ List.In r0 arm_callee_save_regs ->  (ireg_of_reg r) <> r0)
 
-      (Hsub_mem: sub_mem_blk (jit_mem st1) (jit_mem st_final) jit_blk ofs1)
-      (Hofs0 : ofs0 = Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))
-      (Hofs1 : ofs1 = Z.of_nat (jitted_len st1 + (jitted_len st1 + 0)))
-      (Harm_blk : jitted_list st0 = Vptr jit_blk Ptrofs.zero)
-      (Hreg_blk: jit_regs st0 = Vptr regs_blk Ptrofs.zero)
-      (Harm: match_state_arm rbpf_st rs0 m0 old_rs l l1 jit_blk ofs0 st_final)
+      (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
+      (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
+
+      (Hsub_mem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
+      (Hstack_unchanged: stack_unchanged ls rs_init rs0)
+      (Harm: match_state_arm rbpf_st rs_init rs0 m0 l ls st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
       (Hreg_rv0: (eval_reg r rbpf_st) = Some (Val.longofintu (Vint v)))
-      (Hreg_rv1: (eval_jit_reg r st0) = Some (Val.longofintu (Vint v))),
+      (Hjit_rv0: Mem.load Mint32 m0 st_blk ((id_of_reg r + 1) * 8) =
+        Some (Vint v)) (**r guarantee by the match_state between HAVM and CertrBPF*)
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
         exists rs1,
           arm_registers_load_one r rs0 v = rs1 /\
-          arm_memory_inv0 st1 rs0 rs1 m0 m0
-            flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True) /\
+          rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          stack_unchanged ls rs_init rs1 /\
           star BinSem.step ge (State rs0 m0) E0 (State rs1 m0) /\
-          match_state_arm rbpf_st rs1 m0 old_rs (r::l) l1 jit_blk ofs1 st_final.
+           match_state_arm rbpf_st rs_init rs1 m0 (r :: l) ls st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
     Proof.
       intros.
       unfold jit_alu32_thumb_upd_load in Hupd_load.
       unfold jit_alu32_thumb_load_store_template_jit in Hupd_load.
-      destruct Harm_inv.
-      destruct arm_inv_stk as (_ & Hsp_spec).
-      unfold arm_stack_pointer_spec in Hsp_spec.
-      destruct Hsp_spec as (sp_blk & Hrs13_eq & (Hneq0 & Hneq1 & Hneq2 & Hneq3) & Hneq4 & Hperm).
+      unfold rbpf_state_inv in Hjit_inv.
 
+      destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
 
       unfold arm_registers_load_one.
-      exists ((rs0 # (ireg_of_reg r) <- (Vint v)) # PC <-
-  (Val.offset_ptr (rs0 # (ireg_of_reg r) <- (Vint v) PC) wsize)).
+      eexists.
       split; [reflexivity | ].
 
       split.
-      { (**r arm_memory_inv0 *)
-        constructor; try assumption.
-        - (**r rs IR13 + arm_stack_pointer_spec *)
-          rewrite Hrs13_eq.
-          split.
-          + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            rewrite Hrs13_eq.
-            reflexivity.
-            clear - HF.
-            unfold ireg_of_reg in HF; destruct r; simpl in HF; inversion HF.
-          + unfold arm_stack_pointer_spec.
-            exists sp_blk.
-            split; [assumption | ].
-            split.
-            { repeat (split; [assumption | ]); assumption. }
-            split; assumption.
-        - (**r arm_assume_register_map *)
-          destruct arm_inv_reg as (Harm_inv_reg0 & _ & Hrange_perm).
-          split; [assumption | ].
-          split; [ | assumption].
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          unfold arm_assume_register_map in Harm_inv_reg0.
-          unfold arm_assume_register_map.
-          intros r0.
-          specialize (Harm_inv_reg0 r0).
-          destruct r0.
-          + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-
-            destruct (ireg_eqb (ireg_of_reg r) i) eqn: Hreg_eqb;
-              [ apply ireg_eqb_true in Hreg_eqb |
-                apply ireg_eqb_false in Hreg_eqb
-              ].
-            * subst i.
-              rewrite Pregmap.gss.
-              auto.
-            * rewrite Pregmap.gso; [assumption | intros HF; inversion HF].
-              apply Hreg_eqb.
-              auto.
-          + repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-          + repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-          + rewrite Pregmap.gss; auto.
-            unfold Val.offset_ptr; destruct (rs0 PC); auto.
-        - (**r jit_state_memory_layout *)
-          unfold jit_state_memory_layout in *.
-          destruct arm_inv_st as (arm_inv_st0 & arm_inv_st1).
-          split; [assumption | ].
-          unfold regs_layout in *.
-          intros r0.
-          specialize (arm_inv_st1 r0).
-          destruct arm_inv_st1 as (vi & Hreg & Hload0 & Hload1 & Hreg_eq).
-          exists vi.
-          split.
-          + rewrite <- Hreg.
-            symmetry.
-            eapply upd_jitted_list_unchange_eval_jit_reg_2
-              with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-            (**r jit_regs st0 = Vptr regs_blk Ptrofs.zero *)
-            clear - Hneq4; unfold block_neq in Hneq4.
-            intuition.
-          + split; [assumption | ].
-            split; [assumption | ].
-
-            intros vj Heval_reg0.
-            apply Hreg_eq.
-            rewrite <- Heval_reg0.
-            eapply upd_jitted_list_unchange_eval_jit_reg_2
-              with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-            clear - Hneq4; unfold block_neq in Hneq4.
-            intuition.
+      { (**r rs IR12 *)
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        - assumption.
+        - clear - HF.
+          unfold ireg_of_reg; destruct r; inversion HF.
       }
-
-      destruct Harm.
-
-      rename ofs into ofs0.
-      rename rs into rs0.
-      rename arm_mem0 into m0.
-      rename lsr_stack into l.
-
-      rename arm_blk into jit_blk.
-      rename jit_st_final into st_final.
-
-      unfold arm_registers_pre_weak in Hpre.
-      unfold jit_state_memory_layout in arm_inv_st.
-
-      simpl in arm_inv_st.
-      destruct arm_inv_st as (Hst_load & Hlayout).
-      unfold regs_layout in Hlayout.
-
-      specialize (Hlayout r).
-      destruct Hlayout as (vi & Hlayout).
 
       apply upd_jitted_list_jittted_len_2 in Hupd_load as Hlen_eq.
 
@@ -2230,106 +1472,129 @@ Section JITProofWhole.
         change Ptrofs.max_unsigned with 4294967295; lia.
       }
 
+      assert (Hlen_eq1: Ptrofs.unsigned (Ptrofs.add 
+          (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) (Ptrofs.of_int (Int.repr 2))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2)). {
+        unfold Ptrofs.add.
+        change (Ptrofs.unsigned (Ptrofs.of_int (Int.repr 2))) with 2.
+        rewrite Ptrofs.unsigned_repr.
+        - rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+        - change Ptrofs.max_unsigned with 4294967295.
+          rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+
+      split.
+      { (**r unused callee_save *)
+        unfold stack_unchanged in *.
+        intros r0 Hin.
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        - eapply Hstack_unchanged; eauto.
+        - eapply Hlist_not_in1; eauto.
+      }
+
       split.
       { (**r star BinSem.step *)
         eapply star_one.
-        eapply exec_step_bin.
+        eapply exec_step_bin with
+          (i := Pldr (ireg_of_reg r) IR12
+            (SOimm (Int.add (Int.mul (int_of_reg r) (Int.repr 8)) (Int.repr 8)))) (w := true).
         - (**r find_instr *)
-          rewrite HPC_eq.
+          rewrite Harm_pc.
 
-          assert (Heq: find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st_final) =
-                        find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) m0). {
+          assert (Heq: find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) m0 =
+            find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st1)). {
             unfold find_instr.
-            simpl.
-            erewrite <- Mem.load_unchanged_on_1; eauto.
-
-            - (**r Mem.load *)
-              clear Hst_load Hlayout.
-              destruct Mem.load eqn: Hload; [| reflexivity].
-              erewrite <- Mem.load_unchanged_on_1; eauto.
-              + (**r block neq *)
-                intros ofs Hofs_range.
-                simpl.
-                rewrite Hrs13_eq; unfold not_stack_blk.
-                clear - Hneq1 Hneq4.
-                unfold block_neq in Hneq4.
-                intuition.
-            - (**r block neq *)
-              intros ofs Hofs_range.
-              simpl.
-              rewrite Hrs13_eq; unfold not_stack_blk.
-              clear - Hneq1 Hneq4.
-              unfold block_neq in Hneq4.
-              intuition.
-          }
-          rewrite <- Heq; clear Heq.
-
-          assert (Heq: find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st_final) =
-                        find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st1)). {
-            unfold find_instr.
-            rewrite Hofs0; simpl.
-            clear - flag_blk regs_blk jit_blk jit_state_blk Hofs1 Hupd_load Hsub_mem Hcond Hlen_eq Hlen_eq0.
             unfold sub_mem_blk in Hsub_mem.
-            repeat rewrite <- Hsub_mem.
 
-            3:{
-              rewrite Hofs1.
-              rewrite Hlen_eq0.
-              simpl.
-              lia.
-            }
+            eapply upd_jitted_list_2_load with (jit_blk := jit_blk) in Hupd_load as Hload; eauto.
+            eapply upd_jitted_list_2_load_2 with (jit_blk := jit_blk) in Hupd_load as Hload2; eauto.
 
+            simpl.
+            rewrite Hofs0; simpl.
+            rewrite <- Hsub_mem.
             2:{
-              simpl.
-              unfold Ptrofs.add, Ptrofs.of_int.
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hlen_eq.
               rewrite Hlen_eq0.
-              change (Ptrofs.unsigned (Ptrofs.repr (Int.unsigned (Int.repr 2)))) with 2.
-
-              assert (Hlen_eq1: Ptrofs.unsigned (Ptrofs.repr 
-                    (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2))  = 
-                  (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2)). {
-                rewrite Ptrofs.unsigned_repr.
-                reflexivity.
-                change Ptrofs.max_unsigned with 4294967295; lia.
-              }
-              rewrite Hlen_eq1.
+              change (size_chunk Mint16unsigned) with 2.
               lia.
             }
+
+            unfold Ptrofs.of_int in Hload.
+            rewrite Int.unsigned_repr in Hload.
+            2:{ change Int.max_unsigned with 4294967295; lia. }
+            rewrite Hload.
+            simpl.
+            rewrite <- Hsub_mem.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hlen_eq.
+              rewrite Hlen_eq1.
+              change (size_chunk Mint16unsigned) with 2.
+              lia.
+            }
+            unfold Ptrofs.of_int in Hload2.
+            rewrite Int.unsigned_repr in Hload2.
+            2:{ change Int.max_unsigned with 4294967295; lia. }
+            unfold Ptrofs.of_int.
+            change (Int.unsigned (Int.repr 2)) with 2.
+            rewrite Hload2.
+            simpl.
             reflexivity.
           }
           rewrite Heq; clear Heq.
-
-          instantiate (2 := Pldr (ireg_of_reg r) IR12 (SOimm (Int.repr (8 * id_of_reg r)))).
-          instantiate (1 := true).
-          eapply lemma_thumb_ldr; eauto.
-          + destruct r; simpl; lia.
-          + unfold int_of_ireg.
-            change (Z.of_nat (ireg2nat IR12)) with 12.
-            rewrite ireg2nat_ireg_of_reg_reg2nat.
+          assert (Heq: Int.unsigned (Int.mul (int_of_reg r) (Int.repr 8)) + Int.unsigned (Int.repr 8) =
+            (id_of_reg r) * 8 + 8). {
+            unfold Int.mul, int_of_reg, id_of_reg.
             change (Int.unsigned (Int.repr 8)) with 8.
-            rewrite reg_mul_8_eq in Hupd_load.
+            rewrite Int.unsigned_repr.
+            - rewrite Int.unsigned_repr; [destruct r; lia |].
+              change Int.max_unsigned with 4294967295; destruct r; lia.
+            - rewrite Int.unsigned_repr;
+                change Int.max_unsigned with 4294967295; destruct r; lia.
+          }
+          eapply lemma_thumb_ldr; eauto.
+          + rewrite Heq.
+            unfold id_of_reg; destruct r; lia.
+          + unfold Int.add in Hupd_load.
+            unfold int_of_ireg.
+            change (Z_of_ireg IR12) with 12.
+            clear Heq.
+            assert (Heq: (int_of_reg r) = (Int.repr (Z_of_ireg (ireg_of_reg r)))).
+            { unfold int_of_reg, id_of_reg, Z_of_ireg, ireg_of_reg.
+              f_equal.
+              destruct r; reflexivity.
+            }
+            rewrite <- Heq; clear Heq.
             assumption.
         - (**r exec_instr *)
-          remember ((Int.repr (8 * id_of_reg r))) as Hnum.
           simpl.
-          rewrite Hpre; simpl.
+          rewrite Hrs0_12; simpl.
           rewrite Ptrofs.add_zero_l.
           unfold exec_load; simpl.
-          subst Hnum.
-          rewrite ptrofs_unsigned_repr_reg_mul_8.
-          destruct Hlayout as (Heval_reg & Hload64 & Hload32 & Haxiom).
-          rewrite Hload32.
+          rewrite Ptrofs_unsigned_of_int_reg_add_mul_8.
+          rewrite Hjit_rv0.
           f_equal.
-          unfold nextinstr.
-          specialize (Haxiom v Hreg_rv1).
-          subst vi.
-          reflexivity.
       }
 
       { (**r match_state_arm *)
         constructor; try assumption.
+        - (**r ra_blk *)
+          destruct Hra_blk as (ofs & Hra_blk).
+          rewrite Pregmap.gso; [ | intros HF; inversion HF].
+          rewrite Pregmap.gso; [ | intros HF; inversion HF].
+          exists ofs; assumption.
+          clear - HF.
+          unfold ireg_of_reg in HF.
+          destruct r; inversion HF.
         - (**r regs_agree *)
           unfold regs_agree in *.
+          destruct Harm_reg_syn as (Harm_reg_syn & Hnodup).
+          split; [ | rewrite NoDup_cons_iff; split; assumption ].
+
           intros r0 Hin.
           destruct Hin as [Hrs_eq | Hin].
           + subst r0.
@@ -2338,13 +1603,13 @@ Section JITProofWhole.
             rewrite Pregmap.gso; [ | intros HF; inversion HF].
             rewrite Pregmap.gss.
             f_equal.
-          + specialize (Hreg_agree r0 Hin).
+          + specialize (Harm_reg_syn r0 Hin).
             assert (Hneq: r0 <> r). {
               intro HF; subst r0.
               apply Hlist_not_in.
               assumption.
             }
-            destruct Hreg_agree as (vj & Hrs0_eq & Heval_reg0).
+            destruct Harm_reg_syn as (vj & Hrs0_eq & Heval_reg0).
             exists vj.
             split; [| assumption].
             rewrite Pregmap.gso; [ | intros HF; inversion HF].
@@ -2352,77 +1617,80 @@ Section JITProofWhole.
             apply Hneq.
             apply ireg_of_reg_eq.
             assumption.
+        - (**r regs_unchanged *)
+          unfold regs_unchanged in *.
+          intros r0 HT.
+          assert (Heq: ~In r0 l). { 
+            intros HF; apply HT.
+            right; assumption.
+          }
+          specialize (Harm_reg_same _ Heq).
+          destruct Harm_reg_same as (vi & Hload1 & Hload2).
+          exists vi.
+          split; assumption.
         - (**r arm_synch_stack *)
-          unfold arm_synch_stack in Hstack.
+          unfold arm_synch_stack in Harm_stack_syn.
           unfold arm_synch_stack.
-          destruct Hstack as (Hload & Hstack).
-          split.
-          + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            assumption.
+          destruct Harm_stack_syn as (Harm_stack_syn & Hnodup).
+          split; [| assumption].
+          intros r0 Hin.
+          specialize (Harm_stack_syn r0 Hin).
+          rewrite Pregmap.gso; [ | intros HF; inversion HF].
+          rewrite Pregmap.gso; [ | intros HF; inversion HF].
+          assumption.
+          clear - HF.
+          unfold ireg_of_reg in HF.
+          destruct r; inversion HF.
+        - (**r rs IR13 *)
+          rewrite Pregmap.gso; [ | intros HF; inversion HF].
+          rewrite Pregmap.gso; [ | intros HF; inversion HF].
+          2:{
             clear - HF.
             unfold ireg_of_reg in HF.
             destruct r; inversion HF.
-          + intros r0 Hin.
-            specialize (Hstack r0 Hin).
-            rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            rewrite Pregmap.gso; [ | intros HF; inversion HF].
-            assumption.
-            clear - HF.
-            unfold ireg_of_reg in HF.
-            destruct r; inversion HF.
+          }
+
+          split; assumption.
+
         - (**r rs PC *)
           rewrite Pregmap.gss.
           rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          rewrite HPC_eq.
+          rewrite Harm_pc.
           unfold Val.offset_ptr, wsize.
           f_equal.
-          rewrite <- Hlen_eq in Hofs1.
-          rewrite Hofs0, Hofs1.
-          unfold Ptrofs.add.
-          f_equal.
-          rewrite Hlen_eq0.
-          change (Ptrofs.unsigned (Ptrofs.repr 4)) with 4.
-          lia.
-        - (**r Mem.unchanged_on *)
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          assumption.
-          clear - HF.
-          unfold ireg_of_reg in HF.
-          destruct r; inversion HF.
-        - (**r Mem.unchanged_on *)
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          assumption.
-          clear - HF.
-          unfold ireg_of_reg in HF.
-          destruct r; inversion HF.
+          eapply add_ofs_4; eauto.
+
+        - (**r Mem.range_perm *)
+          split; assumption.
       }
     Qed.
 
 
-    Lemma jit_load_simulation: forall l1 l l2 rbpf_st st0 st1 st_final old_rs rs0 ofs0 ofs1 m0
-      (Hpre: arm_registers_pre_weak rs0)
+    Lemma jit_load_simulation: forall l1 l ls rbpf_st st0 st1 rs_init rs0 m0
+      ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
       (Hldr: jit_alu32_load_list l = Some l1)
       (Hjit_load: jit_alu32_thumb_load l1 st0 = Some st1)
 
-      (Harm_inv: arm_memory_inv0 st0 rs0 rs0 m0 m0
-        flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True))
-      (Hst: match_state_jit rbpf_st st0)
+      (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
+      (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
+      (Hsub_mem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
+      (Hlist_not_in1: forall r0, ~List.In r0 ls /\ List.In r0 arm_callee_save_regs ->
+        (forall r1, List.In r1 l1 -> (ireg_of_reg r1) <> r0))
 
-      (Hsub_mem: sub_mem_blk (jit_mem st1) (jit_mem st_final) jit_blk ofs1)
-      (Hofs0 : ofs0 = Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))
-      (Hofs1 : ofs1 = Z.of_nat (jitted_len st1 + (jitted_len st1 + 0)))
-      (Harm_blk : jitted_list st0 = Vptr jit_blk Ptrofs.zero)
-      (Hreg_blk: jit_regs st0 = Vptr regs_blk Ptrofs.zero)
-      (Harm: match_state_arm rbpf_st rs0 m0 old_rs [] l2 jit_blk ofs0 st_final),
+      (Hstack_unchanged: stack_unchanged ls rs_init rs0)
+      (**r match_state between HAVM and CertrBPF: the register maps are corresponding *)
+      (Hreg_jit: forall r, exists v, eval_reg r rbpf_st = Some (Val.longofintu (Vint v)) /\
+        Mem.load Mint32 m0 st_blk ((id_of_reg r + 1) * 8) = Some (Vint v))
+
+      (Harm: match_state_arm rbpf_st rs_init rs0 m0 [] ls st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
         exists rs1,
           arm_registers_load l1 rbpf_st rs0 rs1 /\
-          arm_memory_inv0 st1 rs0 rs1 m0 m0
-            flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True) /\
+          rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          stack_unchanged ls rs_init rs1 /\
           star BinSem.step ge (State rs0 m0) E0 (State rs1 m0) /\
-          match_state_arm rbpf_st rs1 m0 old_rs l1 l2 jit_blk ofs1 st_final.
+          match_state_arm rbpf_st rs_init rs1 m0 l1 ls st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
     Proof.
       induction l1; simpl; intros.
       { (**r l = [] *)
@@ -2432,6 +1700,7 @@ Section JITProofWhole.
         split; [reflexivity | ].
         split.
         { injection Hjit_load as Hst_eq; subst st0; assumption. }
+        split; [assumption |].
         split; [econstructor; eauto | ].
 
         injection Hjit_load as Hst_eq; subst st1.
@@ -2450,176 +1719,27 @@ Section JITProofWhole.
         eapply jit_alu32_load_list_tl; eauto.
       }
       destruct Hexists_l as (lr & Hexists_l).
-      specialize (IHl1 lr l2 rbpf_st stk st1 st_final).
+      specialize (IHl1 lr ls rbpf_st stk st1 rs_init).
 
       destruct jit_alu32_load_list eqn: Hnl1 in Hldr; [| inversion Hldr].
       rename l0 into nl1.
 
-      assert (Hreg_val: exists v, eval_reg a rbpf_st = Some (Val.longofintu (Vint v))). {
-        destruct Hst.
-        unfold match_registers in mregs0.
-        destruct mregs0 as (Hreg_blk_eq & Hjit_blk & Hmregs0).
-        specialize (Hmregs0 a).
-        destruct Hmregs0 as (vi & Heval_reg & _).
-        exists vi. assumption.
-      }
+      specialize (Hreg_jit a) as Hreg_jit_eq.
+      destruct Hreg_jit_eq as (v & Hreg_val & Hjit_val).
 
-      destruct Hreg_val as (v & Hreg_val).
-
-      eapply jit_load_one_simulation with
-        (rbpf_st := rbpf_st) (l := []) (v := v) (st_final := st_final) in Hupd_load as Hone_step; eauto.
+      eapply jit_load_one_simulation with (r := a) (l := []) (v := v) (ls := ls)
+        (rbpf_st := rbpf_st) (rs_init := rs_init) (rs0 := rs0) (m0 := m0)
+        (st_blk := st_blk) (jit_blk := jit_blk) (sp_blk := sp_blk)
+        (old_sp := old_sp) in Hupd_load as Hone_step; eauto.
       - (**r MAIN *)
-        destruct Hone_step as (rsk & Hloadk & Hinvk & Hstark & Hmatch_statek).
-        unfold arm_registers_load_one in Hloadk. (*
-        remember ((rs0 # (ireg_of_reg a) <- (Vint v)) # PC <-
-               (Val.offset_ptr (rs0 # (ireg_of_reg a) <- (Vint v) PC) wsize)) as rsk.
-        rewrite Hreg_val in Hrs1_eq.
-        unfold Val.longofintu in Hrs1_eq. *)
-        specialize (IHl1 old_rs rsk).
+        destruct Hone_step as (rsk & Hloadk & Hrs_12k & Hstack_unchangedk & Hstark & Hmatch_statek).
+        unfold arm_registers_load_one in Hloadk.
+
+        specialize (IHl1 rsk m0).
         specialize (IHl1  (Z.of_nat (2 * jitted_len stk)) ).
-        specialize (IHl1 (Z.of_nat (2 * jitted_len st1)) ).
-        specialize (IHl1 m0).
+        specialize (IHl1 (Z.of_nat (2 * jitted_len st1)) st_blk jit_blk sp_blk ra_blk old_sp).
 
-        assert (Heq: arm_registers_pre_weak rsk). {
-          subst rsk.
-          clear - Hpre.
-          unfold arm_registers_pre_weak in *.
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          assumption.
-          clear - HF.
-          unfold ireg_of_reg in HF.
-          destruct a; inversion HF.
-        }
-        specialize (IHl1 Heq); clear Heq.
         specialize (IHl1 Hexists_l Hjit_load).
-
-        assert (Heq: arm_memory_inv0 stk rsk rsk m0 m0
-                  flag_blk regs_blk jit_blk jit_state_blk  (fun _ _ => True)). {
-          subst rsk.
-          clear - Hupd_load Harm_blk Hreg_blk Harm_inv.
-
-          set (old_rs := rs0).
-          assert (Heq: arm_memory_inv0 st0 rs0 old_rs m0 m0
-            flag_blk regs_blk jit_blk jit_state_blk  (fun _ _ => True)) by auto.
-          clear Harm_inv; rename Heq into Harm_inv.
-          assert (Heq0: old_rs = rs0) by auto.
-
-          set (m := m0).
-          assert (Heq: arm_memory_inv0 st0 rs0 old_rs m0 m
-            flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True)) by auto.
-          clear Harm_inv; rename Heq into Harm_inv.
-          assert (Heq1: m = m0) by auto.
-
-          destruct Harm_inv.
-          subst m old_rs.
-          destruct arm_inv_stk as (_ & Hsp_spec).
-          unfold arm_stack_pointer_spec in Hsp_spec.
-          destruct Hsp_spec as (sp_blk & Hrs_eq & Hneq0 & Hneq1 & Hperm).
-
-          constructor; try assumption.
-          - (**r PC + arm_stack_pointer_spec *)
-            split; [f_equal | ].
-            unfold arm_stack_pointer_spec in *.
-            exists sp_blk.
-            split.
-            + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-              rewrite Pregmap.gso; [ | intros HF; inversion HF].
-              assumption.
-              clear - HF.
-              unfold ireg_of_reg in HF.
-              destruct a; inversion HF.
-            + split; [assumption | ].
-              split; assumption.
-          - (**r arm_assume_register_map *)
-            destruct arm_inv_reg as (Harm_inv_reg0 & _ & Hrange_perm).
-            split.
-            + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-              unfold arm_assume_register_map in *.
-              intros r.
-              specialize (Harm_inv_reg0 r).
-              destruct r.
-              * rewrite Pregmap.gso; [ | intros HF; inversion HF].
-
-                destruct (ireg_eqb (ireg_of_reg a) i) eqn: Hreg_eqb;
-                  [ apply ireg_eqb_true in Hreg_eqb |
-                    apply ireg_eqb_false in Hreg_eqb
-                  ].
-                { subst i.
-                  rewrite Pregmap.gss.
-                  auto.
-                }
-                { rewrite Pregmap.gso; [assumption | intros HF; inversion HF].
-                  apply Hreg_eqb.
-                  auto.
-                }
-              * repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              * repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              * rewrite Pregmap.gss; auto.
-                unfold Val.offset_ptr; destruct (rs0 PC); auto.
-            + split; [| assumption].
-              rewrite Pregmap.gso; [ | intros HF; inversion HF].
-              unfold arm_assume_register_map in *.
-              intros r.
-              specialize (Harm_inv_reg0 r).
-              destruct r.
-              * rewrite Pregmap.gso; [ | intros HF; inversion HF].
-
-                destruct (ireg_eqb (ireg_of_reg a) i) eqn: Hreg_eqb;
-                  [ apply ireg_eqb_true in Hreg_eqb |
-                    apply ireg_eqb_false in Hreg_eqb
-                  ].
-                { subst i.
-                  rewrite Pregmap.gss.
-                  auto.
-                }
-                { rewrite Pregmap.gso; [assumption | intros HF; inversion HF].
-                  apply Hreg_eqb.
-                  auto.
-                }
-              * repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              * repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              * rewrite Pregmap.gss; auto.
-                unfold Val.offset_ptr; destruct (rs0 PC); auto.
-          - (**r jit_state_memory_layout *)
-            unfold jit_state_memory_layout in *.
-            destruct arm_inv_st as (arm_inv_st0 & arm_inv_st1).
-            split; [assumption | ].
-            unfold regs_layout in *.
-            intros r0.
-            specialize (arm_inv_st1 r0).
-            destruct arm_inv_st1 as (vi & Hreg & Hload0 & Hload1 & Hreg_eq).
-            exists vi.
-            split.
-            + rewrite <- Hreg.
-              symmetry.
-              eapply upd_jitted_list_unchange_eval_jit_reg_2
-                with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-              (**r jit_regs st0 = Vptr regs_blk Ptrofs.zero *)
-              clear - Hneq1; unfold block_neq in Hneq1.
-              intuition.
-            + split; [assumption | ].
-              split; [assumption | ].
-
-              intros vj Heval_reg0.
-              apply Hreg_eq.
-              rewrite <- Heval_reg0.
-              eapply upd_jitted_list_unchange_eval_jit_reg_2
-                with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-              clear - Hneq1; unfold block_neq in Hneq1.
-              intuition. (*
-          - (**r Mem.unchanged_on *)
-            apply Mem.unchanged_on_refl. *)
-        }
-        specialize (IHl1 Heq); clear Heq.
-
-        assert (Heq: match_state_jit rbpf_st stk). {
-          eapply jit_alu32_thumb_upd_load_unchange_match_state_jit; eauto.
-        }
-        specialize (IHl1 Heq); clear Heq.
-
-        rewrite Hofs1 in Hsub_mem.
-        specialize (IHl1 Hsub_mem).
 
         assert (Heq: Z.of_nat (2 * jitted_len stk) = 
                     Z.of_nat (jitted_len stk + (jitted_len stk + 0))) by lia.
@@ -2629,66 +1749,57 @@ Section JITProofWhole.
                       Z.of_nat (jitted_len st1 + (jitted_len st1 + 0))) by lia.
         specialize (IHl1 Heq); clear Heq.
 
+        assert (Heq: sub_mem_blk (jit_mem st1) m0 jit_blk (Z.of_nat (2 * jitted_len stk))
+         (Z.of_nat (2 * jitted_len st1))). {
+          clear - Hupd_load Hjit_load Hofs0 Hofs1 Hsub_mem Harm Hloadk.
+          unfold sub_mem_blk in *.
+          intros chunk ofs Hofs.
+          erewrite Hsub_mem; eauto.
+          unfold jit_alu32_thumb_upd_load, jit_alu32_thumb_load_store_template_jit in Hupd_load.
+          eapply upd_jitted_list_jittted_len_2 in Hupd_load; eauto.
+          lia.
+        }
+        specialize (IHl1 Heq); clear Heq.
+
+        unfold rbpf_state_inv in *.
         assert (Heq: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
+          clear - Hjit_inv Hupd_load.
           unfold jit_alu32_thumb_upd_load, jit_alu32_thumb_load_store_template_jit in Hupd_load.
-          eapply upd_jitted_list_unchange_jittted_list_2 in Hupd_load; eauto.
+          eapply upd_jitted_list_unchange_jittted_list_2 in Hupd_load.
           rewrite <- Hupd_load.
           assumption.
         }
         specialize (IHl1 Heq); clear Heq.
 
-        assert (Heq: jit_regs stk = Vptr regs_blk Ptrofs.zero). {
-          unfold jit_alu32_thumb_upd_load, jit_alu32_thumb_load_store_template_jit in Hupd_load.
-          eapply upd_jitted_list_unchange_jit_regs_2 in Hupd_load; eauto.
-          rewrite <- Hupd_load.
-          assumption.
+        assert (Heq: (forall r0 : ireg, ~ In r0 ls /\ In r0 arm_callee_save_regs -> 
+          forall r1 : reg, In r1 l1 -> ireg_of_reg r1 <> r0)). {
+          intros r0 Hin0.
+          intros r1 Hin1.
+          eapply Hlist_not_in1; eauto.
         }
-        specialize (IHl1 Heq); clear Heq.
+        specialize (IHl1 Heq Hstack_unchangedk Hreg_jit); clear Heq.
 
-        remember (Z.of_nat (jitted_len stk + (jitted_len stk + 0))) as ofsk.
-        rename Heqofsk into Hofsk.
+        assert (Heq: match_state_arm rbpf_st rs_init rsk m0 [] ls st_blk jit_blk sp_blk ra_blk
+          (Z.of_nat (2 * jitted_len stk)) old_sp). {
+          destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
 
-        set (onel := [a]).
-        assert (Heq: match_state_arm rbpf_st rsk m0 old_rs onel l2 jit_blk ofsk st_final) by auto.
-        clear Hmatch_statek; rename Heq into Hmatch_statek.
-        assert (Heq0: onel = [a]) by auto.
-
-        assert (Heq: match_state_arm rbpf_st rsk m0 old_rs [] l2 jit_blk (Z.of_nat (2 * jitted_len stk))
-         st_final). {
-          simpl.
-          rewrite <- Hofsk.
-
-          clear - Hnodup_load Hofs0 Hofs1 Harm Hreg_val Hloadk Hofsk Hmatch_statek.
-
-          set (el := []).
-          assert (Heq: match_state_arm rbpf_st rs0 m0 old_rs el l2 jit_blk ofs0 st_final) by auto.
-          clear Harm; rename Heq into Harm.
-          assert (Heq1: el = []) by auto.
-
-          destruct Harm.
-          subst lsr.
-          rename arm_mem into m0.
-
-
-          destruct Hmatch_statek.
-
-          rename arm_blk into jit_blk.
-          rename lsr_stack into l2.
-          rename rs0 into rsk.
-          rename rs into rs0.
-          rename arm_mem into m0.
-          rename ofs0 into ofsk.
-          rename ofs into ofs0.
+          destruct Hmatch_statek as (Hra_blkk, Harm_reg_synk, Harm_reg_samek, Harm_stack_synk, (Hsp_blkk & Harm_old_spk),
+              Harm_pck, Harm_valid_blkk, (Hst_blk_permk & Hsp_blk_permk), Harm_reg_validk).
 
           constructor; try assumption.
-          - unfold regs_agree; simpl.
-            intros r HF.
-            inversion HF.
+          - (**r regs_agree *)
+            split; [| apply NoDup_nil].
+            unfold regs_agree.
+            intros r HF; inversion HF.
+          - (**r rsk IR13 *)
+            split; assumption.
+          - (**r Mem.range_perm *)
+            split; assumption.
         }
-        specialize (IHl1 Heq); clear Heq.
+        specialize (IHl1 Heq Hrs_12k); clear Heq.
 
-        destruct IHl1 as (rs1 & Hload1 & Hinv1 & Hstar1 & Hmatch_state_1).
-
+        destruct IHl1 as (rs1 & Hload1 & Hrs_121 & Hstack_unchanged1 & Hstar1 & Hmatch_state_1).
 
         unfold jit_alu32_thumb_upd_load in Hupd_load.
         unfold jit_alu32_thumb_load_store_template_jit in Hupd_load.
@@ -2738,24 +1849,9 @@ Section JITProofWhole.
           reflexivity.
         }
 
-        split.
-        { (**r arm_memory_inv0 *)
-          destruct Hinv1.
-          destruct Hinvk.
-          destruct arm_inv_stk as (Hrsk_r13 & arm_inv_stk).
-          destruct arm_inv_stk0 as (Hrs0_r13 & arm_inv_stk0).
-          destruct arm_inv_reg as (arm_inv_reg_rsk & arm_inv_reg_rs1 & Hrange_perm).
-          destruct arm_inv_reg0 as (arm_inv_reg_rs0 & _).
-          constructor; try assumption.
-          - (**r rs IR13 *)
-            split.
-            + rewrite <- Hrsk_r13.
-              assumption.
-            + assumption.
-          - (**r arm_assume_register_map *)
-            split; [assumption | ].
-            split; assumption.
-        }
+        split; [ (**r rs1 IR12 *) assumption | ].
+
+        split; [ (**r stack_unchanged *) assumption | ].
 
         split.
         { (**r star BinSem.step *)
@@ -2766,41 +1862,46 @@ Section JITProofWhole.
         simpl in Hmatch_state_1.
         rewrite <- Hofs1 in Hmatch_state_1.
 
-        destruct Hinv1.
-        destruct Hinvk.
-        destruct Harm_inv.
-        clear Hst.
-        destruct Hmatch_state_1.
-        destruct Hmatch_statek.
-        rename rs1 into rsk.
-        rename rs into rs1.
-        rename lsr into l1.
-        rename lsr_stack into l2.
-        rename arm_blk into jit_blk.
-        rename ofs1 into ofsk.
-        rename ofs into ofs1.
-        rename jit_st_final into st_final.
+        destruct Hmatch_state_1 as (Hra_blk1, Harm_reg_syn1, Harm_reg_same1, Harm_stack_syn1, (Hsp_blk1 & Harm_old_sp1),
+            Harm_pc1, Harm_valid_blk1, (Hst_blk_perm1 & Hsp_blk_perm1), Harm_reg_valid1).
 
-        subst lsr0.
+        destruct Hmatch_statek as (Hra_blkk, Harm_reg_synk, Harm_reg_samek, Harm_stack_synk, (Hsp_blkk & Harm_old_spk),
+            Harm_pck, Harm_valid_blkk, (Hst_blk_permk & Hsp_blk_permk), Harm_reg_validk).
 
         constructor; try assumption.
-
-        (**r regs_agree *)
-        unfold regs_agree in *.
-        intros r Hin.
-        destruct Hin as [Hr | Hin].
-        * subst a.
-          assert (Heq: In r [r]) by (simpl; left; reflexivity).
-          specialize (Hreg_agree0 r Heq); clear Heq.
-          eapply arm_registers_load_unchange_nodup_register with (r := r) in Hload1; eauto.
-          2:{
-            apply NoDup_cons_iff in Hnodup_load.
-            clear - Hnodup_load.
-            intuition.
-          }
-          rewrite <- Hload1.
+        + (**r regs_agree *)
+          unfold regs_agree in *.
+          split; [| assumption].
+          intros r Hin.
+          destruct Hin as [Hr | Hin].
+          * subst a.
+            assert (Heq: In r [r]) by (simpl; left; reflexivity).
+            destruct Harm_reg_synk as (Harm_reg_synk & _).
+            specialize (Harm_reg_synk r Heq); clear Heq.
+            eapply arm_registers_load_unchange_nodup_register with (r := r) in Hload1; eauto.
+            2:{
+              apply NoDup_cons_iff in Hnodup_load.
+              clear - Hnodup_load.
+              intuition.
+            }
+            rewrite <- Hload1.
+            assumption.
+          * destruct Harm_reg_syn1 as (Harm_reg_syn1 & _).
+            apply Harm_reg_syn1; auto.
+        + (**r regs_unchanged *)
+          unfold regs_unchanged in *.
+          intros r HT.
+          eapply Harm_reg_samek; eauto.
+          intro HF; apply HT.
+          left.
+          destruct HF.
           assumption.
-        * apply Hreg_agree; auto.
+          inversion H.
+        + (**r rs IR13 *)
+          split; assumption.
+        + (**r Mem.range_perm *)
+          split; assumption.
+
     - (**r sub_mem_blk *)
       unfold sub_mem_blk in *.
       intros chunk ofs Hrange.
@@ -2814,63 +1915,60 @@ Section JITProofWhole.
         lia.
       }
 
-      eapply jit_alu32_thumb_load_load_same; eauto.
       unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hupd_load.
-      eapply upd_jitted_list_unchange_jittted_list_2 in Hupd_load; eauto.
-      rewrite <- Hupd_load; assumption.
-    - rewrite <- Hreg_val.
-      symmetry.
-      clear - Hst.
-      destruct Hst.
-      clear - mregs0.
-      unfold match_registers in mregs0.
-      destruct mregs0 as (_ & _ & Hreg).
-      specialize (Hreg a).
-      destruct Hreg as (vi & Hreg0 & Hreg1 & _).
-      rewrite Hreg0, Hreg1.
-      f_equal.
+      eapply jit_alu32_thumb_load_load_same; eauto.
+      + eapply upd_jitted_list_unchange_jittted_list_2 in Hupd_load; eauto.
+        rewrite <- Hupd_load; assumption.
+      + eapply upd_jitted_list_jittted_len_2 in Hupd_load; eauto.
+        lia.
     Qed.
   End JITLoad.
 
   Section JITCore.
 
-    Lemma jit_core_one_simulation: forall ins l l1 rbpf_st0 rbpf_st1 st0 st1 st_final old_rs rs0 ofs0 ofs1 m0 arm_blk (**r Here I can not use jit_blk directly *)
-      (Hpre: arm_registers_pre_weak rs0)
+    Lemma jit_core_one_simulation: forall ins l ls rbpf_st0 rbpf_st1 st0 st1 rs_init rs0 m0
+      ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
       (Hjit : bpf_alu32_to_thumb ins st0 = Some st1)
 
-      (Harm_inv: arm_memory_inv0 st0 rs0 rs0 m0 m0
-        flag_blk regs_blk arm_blk jit_state_blk (fun _ _ => True))
+      (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
+      (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
 
-      (Hsub_mem: sub_mem_blk (jit_mem st1) (jit_mem st_final) arm_blk ofs1)
-      (Hofs0 : ofs0 = Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))
-      (Hofs1 : ofs1 = Z.of_nat (jitted_len st1 + (jitted_len st1 + 0)))
-      (Harm_blk : jitted_list st0 = Vptr arm_blk Ptrofs.zero)
-      (Hreg_blk: jit_regs st0 = Vptr regs_blk Ptrofs.zero)
-      (Hreg_blk1: regs_st rbpf_st0 = Vptr regs_blk Ptrofs.zero)
-      (Hst: match_state_arm rbpf_st0 rs0 m0 old_rs l l1 arm_blk ofs0 st_final)
+      (Hsub_mem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
+
+      (Hlist_not_in1: forall r0, ~List.In r0 ls /\ List.In r0 arm_callee_save_regs ->
+        (forall r1, List.In r1 l -> (ireg_of_reg r1) <> r0))
+
+      (Hreg_blk1: regs_st rbpf_st0 = Vptr st_blk (Ptrofs.repr 8)) (**r guaranteed by match_state between HAVM and CertrBPF *)
+      (Hstack_unchanged: stack_unchanged ls rs_init rs0)
+      (Hst: match_state_arm rbpf_st0 rs_init rs0 m0 l ls st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
       (Hins_regs: ins_is_sync_regs ins l)
-      (Hstep: rbpf_step rbpf_st0 ins rbpf_st1),
+      (Hstep: rbpf_step rbpf_st0 ins rbpf_st1)
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
         exists rs1,
           plus BinSem.step ge (State rs0 m0) E0 (State rs1 m0) /\
-          arm_registers_pre_weak rs1 /\
-          arm_memory_inv0 st1 rs0 rs1 m0 m0
-            flag_blk regs_blk arm_blk jit_state_blk (fun _ _ => True) /\
-          match_state_arm rbpf_st1 rs1 m0 old_rs l l1 arm_blk ofs1 st_final.
+          rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          stack_unchanged ls rs_init rs1 /\
+          match_state_arm rbpf_st1 rs_init rs1 m0 l ls st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
     Proof.
       unfold bpf_alu32_to_thumb.
       intros.
       induction Hstep as [rbpf_st0 a op rd ri ret rbpf_st1].
-      destruct Harm_inv.
+      unfold rbpf_state_inv in Hjit_inv.
+      destruct Hst as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+        Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
 
-      induction Hst as [l l1 rbpf_st0 rs0 old_rs st_final arm_blk ofs0 m0].
       destruct a; [| inversion Hjit].
       destruct ri.
       - (**r alu_reg *)
-        unfold regs_agree in Hreg_agree.
+        unfold regs_agree in Harm_reg_syn.
+        unfold arm_synch_stack in Harm_stack_syn.
+        destruct Harm_reg_syn as (Harm_reg_syn & Hnodupl).
+        destruct Harm_stack_syn as (Harm_stack_syn & Hnodupls).
         unfold ins_is_sync_regs in Hins_regs.
         destruct Hins_regs as (Hins_rd & Hins_r).
-        specialize (Hreg_agree rd Hins_rd) as Hins_rd_eq.
-        specialize (Hreg_agree r Hins_r) as Hins_r_eq.
+        specialize (Harm_reg_syn rd Hins_rd) as Hins_rd_eq.
+        specialize (Harm_reg_syn r Hins_r) as Hins_r_eq.
         destruct Hins_rd_eq as (v0 & Hv0_eq & Hreg0).
         destruct Hins_r_eq as (v1 & Hv1_eq & Hreg1).
 
@@ -2891,7 +1989,7 @@ Section JITProofWhole.
           destruct (2 * jitted_len st0 + 4 <=? JITTED_LIST_MAX_LENGTH)%nat eqn: Hmax_jit_size; inversion Hjit.
           clear H0.
 
-          rewrite Harm_blk in *.
+          rewrite Hjit_inv in *.
           unfold Val.add, Archi.ptr64, Ptrofs.of_int, Mem.storev in Hjit.
           rewrite Ptrofs.add_zero_l in Hjit.
           erewrite upd_jitted_list_unsigned_repr_int in Hjit; eauto.
@@ -2906,7 +2004,7 @@ Section JITProofWhole.
             reflexivity.
           }
 
-          assert (Hjit_ptr_eq: jitted_list st1 = Vptr arm_blk Ptrofs.zero). {
+          assert (Hjit_ptr_eq: jitted_list st1 = Vptr jit_blk Ptrofs.zero). {
             clear - Hjit.
             inversion Hjit;
             simpl;
@@ -2920,179 +2018,108 @@ Section JITProofWhole.
             reflexivity.
           }
 
+          assert (Hcond: (2 * jitted_len st0 <= 1000)%nat). {
+            simpl.
+            unfold upd_jitted_list, upd_jitted_list' in Hupd.
+            destruct (2 * jitted_len st0 + 4 <=? JITTED_LIST_MAX_LENGTH)%nat eqn: Hcond1; [| inversion Hupd].
+            unfold JITTED_LIST_MAX_LENGTH in Hcond1.
+            rewrite Nat.leb_le in Hcond1.
+            lia.
+          }
+
+          assert (Hlen_eq0: Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) = 
+              (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))). {
+            rewrite Ptrofs.unsigned_repr.
+            reflexivity.
+            change Ptrofs.max_unsigned with 4294967295; lia.
+          }
+
+          assert (Hlen_eq1: Ptrofs.unsigned (Ptrofs.add 
+              (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) (Ptrofs.of_int (Int.repr 2))) = 
+              (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2)). {
+            unfold Ptrofs.add.
+            change (Ptrofs.unsigned (Ptrofs.of_int (Int.repr 2))) with 2.
+            rewrite Ptrofs.unsigned_repr.
+            - rewrite Ptrofs.unsigned_repr; [lia |].
+              change Ptrofs.max_unsigned with 4294967295; lia.
+            - change Ptrofs.max_unsigned with 4294967295.
+              rewrite Ptrofs.unsigned_repr; [lia |].
+              change Ptrofs.max_unsigned with 4294967295; lia.
+          }
+
           eexists.
           split.
           { (**r we know jitted code is only one *)
             eapply plus_one.
             eapply exec_step_bin with
               (i := Padd (ireg_of_reg rd) (ireg_of_reg rd) (SOreg (ireg_of_reg r))) (w := false).
-            {
+            - (**r find_instr *)
 
-              rewrite HPC_eq.
+              rewrite Harm_pc.
               unfold BinDecode.find_instr.
 
               rewrite Hofs0; simpl.
               subst m.
 
-              assert (Heq1:  Mem.load Mint16unsigned (jit_mem st_final) arm_blk
-                              (Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0))))) = 
-                            Mem.load Mint16unsigned m0 arm_blk
-                              (Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))))). {
-                clear - Hstore Hofs1 Hjit_len_eq arm_inv_stk Hvalid_arm_blk Hupd Harm_mem1 Harm_mem2.
-                eapply Mem.load_unchanged_on_1; eauto.
-                - (**r Mem.valid_block *)
-                  eapply Mem.valid_block_unchanged_on; eauto.
-                - intros; simpl.
-                  clear - arm_inv_stk.
-                  destruct arm_inv_stk as (_ & Hsp_spec).
-                  unfold arm_stack_pointer_spec in Hsp_spec.
-                  destruct Hsp_spec as (sp_blk & Hrs_eq & Hneq0 & Hneq1 & Hperm).
-                  split.
-                  + clear - Hneq1; unfold block_neq in Hneq1.
-                    intuition.
-                  + rewrite Hrs_eq.
-                    unfold not_stack_blk.
-                    clear - Hneq0; intuition.
-              }
-              rewrite <- Heq1; clear Heq1.
-
-              assert (Heq1:  Mem.load Mint16unsigned (jit_mem st_final) arm_blk
-                              (Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0))))) = 
-                            Mem.load Mint16unsigned (jit_mem st1) arm_blk
-                              (Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))))). {
-                clear - Hsub_mem Hstore Hofs1 Hjit_len_eq Hupd.
-                rewrite Hjit_len_eq in Hofs1.
-                unfold sub_mem_blk in Hsub_mem.
-                symmetry.
-                apply Hsub_mem.
-                rewrite Hofs1.
-                set (Hlemma:= upd_jitted_list_unsigned_repr); simpl in Hlemma.
-                erewrite Hlemma; eauto.
+              unfold sub_mem_blk in Hsub_mem.
+              rewrite Hlen_eq0.
+              rewrite <- Hsub_mem.
+              2:{
                 change (size_chunk Mint16unsigned) with 2.
+                rewrite Hofs0, Hofs1.
                 lia.
               }
-
-              rewrite Heq1; clear Heq1.
-
-              erewrite Mem.load_store_same with (m1 := jit_mem st0).
-              2:{
-                set (Hlemma:= upd_jitted_list_unsigned_repr).
-                simpl in Hlemma.
-                erewrite Hlemma; eauto.
-              }
-
-              simpl.
+              simpl in Hstore.
+              erewrite Mem.load_store_same; eauto.
               (**r we know BinDecode.is_thumb2 _ = false in this case *)
-              apply lemma_thumb_add_reg.
-            }
-            {
+              eapply lemma_thumb_add_reg.
+            - (**r exec_instr *)
               simpl.
               unfold nextinstr_nf, nextinstr.
               simpl.
               unfold undef_flags.
               rewrite Pregmap.gso; [ | intros HF; inversion HF].
-              reflexivity.
-            }
+              f_equal.
           }
 
           split.
-          { (**r arm_registers_pre_weak *)
-            unfold arm_registers_pre_weak in *.
+          { (**r rs 12 *)
+            rewrite Pregmap.gso; [ | intros HF; inversion HF].
+            rewrite Pregmap.gso; [ | intros HF; inversion HF].
+            - assumption.
+            - clear - HF; unfold ireg_of_reg in HF; destruct rd; inversion HF.
+          }
+
+          split.
+          { (**r stack_unchanged *)
+            unfold stack_unchanged in *.
+            intros Hr0 Hin0.
+            rewrite Pregmap.gso; [ | intros HF; inversion HF].
+            rewrite Pregmap.gso; [ | intros HF; inversion HF].
+            - eapply Hstack_unchanged; eauto.
+            - eapply Hlist_not_in1 with (r1 := rd); eauto.
+              split.
+              + intro HF1.
+                destruct Hin0 as (Hin0 & Hin1).
+                apply Hin0.
+                subst Hr0.
+                assumption.
+              + subst Hr0. clear - Hin0. intuition.
+          }
+
+          (**r match_state_arm *)
+          constructor; try assumption.
+          { (**r ra_blk *)
             rewrite Pregmap.gso; [ | intros HF; inversion HF].
             rewrite Pregmap.gso; [ | intros HF; inversion HF].
             assumption.
             clear - HF; unfold ireg_of_reg in HF; destruct rd; inversion HF.
           }
-
-          destruct arm_inv_stk as (_ & arm_inv_stk).
-          destruct arm_inv_reg as (arm_inv_reg_rs0 & _ & Hrange_perm).
-          split.
-          { (**r arm_memory_inv0 *)
-            constructor; try assumption.
-            - (**r rs0 IR13 *)
-              split.
-              + unfold Val.offset_ptr.
-                rewrite Pregmap.gso; [ | intros HF; inversion HF].
-                rewrite Pregmap.gso; [ reflexivity | intros HF; inversion HF].
-                clear - HF.
-                unfold ireg_of_reg in HF.
-                destruct rd; inversion HF.
-              + assumption.
-            - (**r arm_assume_register_map *)
-              split; [assumption | ].
-              split; [| assumption ].
-              unfold Val.offset_ptr, arm_assume_register_map.
-              intros r0.
-              unfold arm_assume_register_map in arm_inv_reg_rs0.
-              specialize (arm_inv_reg_rs0 r0).
-
-              clear - arm_inv_reg_rs0 Hupd_reg Hv0_eq Hreg0 Hv1_eq Hreg1 Hupd.
-              destruct r0; auto.
-              + (**r IR *)
-                rewrite Pregmap.gso; [ | intros HF; inversion HF].
-
-                destruct (ireg_eqb (ireg_of_reg rd) i) eqn: Hreg_eqb;
-                  [ apply ireg_eqb_true in Hreg_eqb |
-                    apply ireg_eqb_false in Hreg_eqb
-                  ].
-                * subst i.
-                  rewrite Pregmap.gss.
-                  rewrite Hv0_eq, Hv1_eq.
-                  simpl.
-                  auto.
-                * rewrite Pregmap.gso; [assumption | intros HF; inversion HF].
-                  apply Hreg_eqb.
-                  auto.
-              + (**r CR *)
-                rewrite Pregmap.gso; [ | intros HF; inversion HF].
-                auto.
-              + (**r PC *)
-                rewrite Pregmap.gss.
-                destruct (rs0 PC); auto.
-            - (**r jit_state_memory_layout *)
-              clear - arm_inv_stk Hstore Hjit Harm_blk Hreg_blk arm_inv_st.
-              injection Hjit as Hst_eq; subst st1.
-
-              unfold arm_stack_pointer_spec in arm_inv_stk.
-              destruct arm_inv_stk as (sp_blk & Hrs_13 & Hneq1 & Hneq2 & _).
-
-              unfold jit_state_memory_layout in *.
-              destruct arm_inv_st as (Hload_32 & Hregs_layout).
-              split; [assumption | ].
-              unfold regs_layout in *.
-              intros r0.
-              specialize (Hregs_layout r0).
-              destruct Hregs_layout as (vi & Heval_reg & Hload64 & Hload32 & Haxiom).
-
-              exists vi.
-              split.
-              + rewrite <- Heval_reg.
-                unfold eval_jit_reg.
-                rewrite Hreg_blk; simpl.
-                eapply Mem.load_store_other; eauto.
-                left.
-                clear - Hneq2; unfold block_neq in Hneq2.
-                intuition.
-              + split; [assumption | ].
-                split; [assumption | ].
-
-                intros vj Heval_reg0.
-                apply Haxiom.
-                rewrite <- Heval_reg0.
-                unfold eval_jit_reg.
-                rewrite Hreg_blk; simpl.
-                symmetry.
-                eapply Mem.load_store_other; eauto.
-                left.
-                clear - Hneq2; unfold block_neq in Hneq2.
-                intuition.
-          }
-
-          eapply exec_step; eauto.
           { (**r regs_agree *)
             unfold regs_agree.
-            intros r0 H.
-            specialize (Hreg_agree r0 H).
+            split; [ | assumption].
+            intros r0 Hin.
+            specialize (Harm_reg_syn r0 Hin).
             destruct (reg_eqb r0 rd) eqn: Hreg_eq0;
               [ apply reg_eqb_true in Hreg_eq0 |
                 apply reg_eqb_false in Hreg_eq0].
@@ -3115,7 +2142,7 @@ Section JITProofWhole.
                 eexists; split; [reflexivity | ].
                 rewrite ! Int.repr_unsigned.
                 reflexivity.
-            - destruct Hreg_agree as (vi & Hrs_eq & Hreg_r0).
+            - destruct Harm_reg_syn as (vi & Hrs_eq & Hreg_r0).
               exists vi.
               rewrite Pregmap.gso.
               2:{ intro HF. inversion HF. }
@@ -3132,88 +2159,102 @@ Section JITProofWhole.
               symmetry.
               eapply ConcreteState.eval_upd_reg_other; eauto.
           }
+          { (**r regs_unchanged *)
+            unfold regs_unchanged in *.
+            intros r0 HT.
+            specialize (Harm_reg_same _ HT).
+            destruct Harm_reg_same as (vi & Hload1 & Hload2).
+            exists vi.
+            split; [| assumption].
+            rewrite <- Hload1.
+            unfold upd_reg, upd_reg' in Hupd_reg.
+            rewrite Hreg_blk1 in Hupd_reg.
+            unfold Mem.storev, Val.add, Archi.ptr64 in Hupd_reg.
+            destruct Mem.store eqn: Hstore_reg in Hupd_reg; [| inversion Hupd_reg].
+            assert (Heq: (bpf_m rbpf_st1) = m1). {
+              injection Hupd_reg as Heq.
+              rewrite <- Heq.
+              auto.
+            }
+            rewrite Heq.
+            eapply Mem.load_store_other; eauto.
+            right.
+            change (size_chunk Mint32) with 4.
+            unfold Ptrofs.add, Ptrofs.of_int.
+            change (Ptrofs.unsigned (Ptrofs.repr 8)) with 8.
+            rewrite Int.unsigned_repr.
+            2:{ change Int.max_unsigned with 4294967295; destruct rd; simpl; lia. }
+            rewrite Ptrofs.unsigned_repr with (z := 8 * id_of_reg rd).
+            2:{ change Ptrofs.max_unsigned with 4294967295; destruct rd; simpl; lia. }
+            rewrite Ptrofs.unsigned_repr.
+            2:{ change Ptrofs.max_unsigned with 4294967295; destruct rd; simpl; lia. }
+            change (size_chunk Mint64) with 8.
+            clear - HT Hins_rd.
+            unfold id_of_reg; destruct r0; destruct rd; simpl; try lia.
+            all: exfalso; apply HT; assumption.
+          }
           { (**r arm_synch_stack *)
             unfold arm_synch_stack in *.
             rewrite Pregmap.gso; [| intro HF; inversion HF].
-            destruct Hstack as (Hload_sp & Hload_stack).
-            split.
-            - rewrite Pregmap.gso; [| intro HF; inversion HF].
-              + assumption.
-              + clear - HF; unfold ireg_of_reg in HF; destruct rd; inversion HF.
-            - intros r0 Hin.
-              rewrite Pregmap.gso; [| intro HF; inversion HF].
-              + eapply Hload_stack; eauto.
-              + clear - HF; unfold ireg_of_reg in HF; destruct rd; inversion HF.
+            split; [| assumption].
+            intros r0 Hin.
+            specialize (Harm_stack_syn r0 Hin).
+            rewrite Pregmap.gso; [| intro HF; inversion HF].
+            - eapply Harm_stack_syn; eauto.
+            - clear - HF; unfold ireg_of_reg in HF; destruct rd; inversion HF.
+          }
+          { (**r rs IR13 *)
+            rewrite Pregmap.gso; [| intro HF; inversion HF].
+            rewrite Pregmap.gso; [| intro HF; inversion HF].
+            - split; assumption.
+            - clear - HF; unfold ireg_of_reg in HF; destruct rd; inversion HF.
           }
           { (**r rs PC *)
             rewrite Pregmap.gss.
-            rewrite HPC_eq, Hofs0, Hofs1, Hjit_len_eq.
+            rewrite Harm_pc.
             unfold Val.offset_ptr.
             f_equal.
-            unfold Ptrofs.add, isize.
-            f_equal.
-            change (Ptrofs.unsigned (Ptrofs.repr 2)) with 2.
-            clear - Hmax_jit_size.
-            rewrite Nat.leb_le in Hmax_jit_size.
-            unfold JITTED_LIST_MAX_LENGTH in Hmax_jit_size.
-            rewrite Ptrofs.unsigned_repr; [ | change Ptrofs.max_unsigned with 4294967295; lia].
-            f_equal.
-            lia.
+            unfold isize.
+            eapply add_ofs_2; eauto.
           }
-          { (**r Mem.unchanged_on *)
-            rewrite Pregmap.gso; [| intro HF; inversion HF].
-            rewrite Pregmap.gso; [| intro HF; inversion HF].
-            - assumption.
-            - clear - HF; unfold ireg_of_reg in HF; destruct rd; inversion HF.
+          { (**r Mem.range_perm *)
+            split; assumption.
           }
-          { (**r Mem.unchanged_on *)
-            rewrite Pregmap.gso; [| intro HF; inversion HF].
-            rewrite Pregmap.gso; [| intro HF; inversion HF].
-            - assumption.
-            - clear - HF; unfold ireg_of_reg in HF; destruct rd; inversion HF.
-          }
-        + admit.
-        + admit.
-        + admit. (**r the rest part is trivial *)
-        + admit.
-        + admit.
-        + admit.
-        + admit.
-        + admit.
-        + admit.
-        + admit.
-        + admit.
-      - (**r alu_imm *)
-        admit.
+        all: admit. (**r the most of the rest part is trivial, but div and shifts need an additional invariant as precondition TODO *)
     Admitted.
 
-
     Lemma jit_core_simulation: forall l rbpf_st0 rbpf_st1
-      (Hstep: rbpf_sem rbpf_st0 l rbpf_st1) l1 l2 l3 st0 st1 st_final rs0 m0 old_rs ofs0 ofs1
-      (Hpre: arm_registers_pre_weak rs0)
+      (Hstep: rbpf_sem rbpf_st0 l rbpf_st1)
+      l1 l2 ls st0 st1 rs_init rs0 m0
+      ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
+
       (Hldr: jit_alu32_load_list l = Some l1)
       (Hldr_sub: list_subset l1 l2)
       (Hjit: jit_core l st0 = Some st1)
 
-      (Harm_inv: arm_memory_inv0 st0 rs0 rs0 m0 m0
-        flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True))
 
       (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
       (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
-      (Harm_blk: jitted_list st0 = Vptr jit_blk Ptrofs.zero)
-      (Hreg_blk: jit_regs st0 = Vptr regs_blk Ptrofs.zero)
-      (Hreg_blk1: regs_st rbpf_st0 = Vptr regs_blk Ptrofs.zero)
-      (Hmem: sub_mem_blk (jit_mem st1) (jit_mem st_final) jit_blk ofs1)
-      (Hst: match_state_arm rbpf_st0 rs0 m0 old_rs l2 l3 jit_blk ofs0 st_final),
+      (Hmem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
+      (Hreg_blk1: regs_st rbpf_st0 = Vptr st_blk (Ptrofs.repr 8))
+
+
+      (Hlist_not_in1: forall r0, ~List.In r0 ls /\ List.In r0 arm_callee_save_regs ->
+        (forall r1, List.In r1 l2 -> (ireg_of_reg r1) <> r0))
+      (Hstack_unchanged: stack_unchanged ls rs_init rs0)
+      (Harm: match_state_arm rbpf_st0 rs_init rs0 m0 l2 ls st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
       exists rs1,
         star BinSem.step ge (State rs0 m0) E0 (State rs1 m0) /\
-        arm_memory_inv0 st1 rs0 rs1 m0 m0
-          flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True) /\
-        match_state_arm rbpf_st1 rs1 m0 old_rs l2 l3 jit_blk ofs1 st_final.
+        rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          stack_unchanged ls rs_init rs1 /\
+        match_state_arm rbpf_st1 rs_init rs1 m0 l2 ls st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
     Proof.
+      unfold rbpf_state_inv.
       induction 1 as [ | rbpf_st0 rbpf_stk rbpf_st1 hd tl Hone_step Hplus_step IH].
       { (**r l = [] *)
-        intros; simpl in *.
+        intros.
         injection Hjit as Hjit_eq; subst st1.
         exists rs0.
         split; [ apply star_refl | ].
@@ -3221,6 +2262,7 @@ Section JITProofWhole.
         injection Hldr as Hlsr_eq; subst l1.
         rewrite <- Hofs0 in Hofs1.
         subst ofs1.
+        split; [assumption |].
         split; assumption.
       }
 
@@ -3231,8 +2273,8 @@ Section JITProofWhole.
       rename j into stk.
 
       assert (Hstk_ptr: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
-        clear - Hone_ins Harm_blk.
-        rewrite <- Harm_blk.
+        clear - Hone_ins Hjit_inv.
+        rewrite <- Hjit_inv.
         symmetry.
         eapply bpf_alu32_to_thumb_unchange_jittted_list; eauto.
       }
@@ -3241,26 +2283,23 @@ Section JITProofWhole.
 
       induction Hone_step as [rbpf_st0 a op rd ri ret rbpf_stk].
 
-      set (jit_blk' := jit_blk).
-      assert (Heq_blk : jit_blk' = jit_blk) by auto.
+      destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
 
-      induction Hst as [l2 l3 rbpf_st0 rs0 old_rs st_final jit_blk ofs0 m0].
-      subst jit_blk'.
-
-      specialize (IH l l2 l3 stk st1 st_final).
+      specialize (IH l l2 ls stk st1 rs_init).
 
       remember (Z.of_nat (jitted_len stk + (jitted_len stk + 0))) as ofsk.
       rename Heqofsk into Hofsk.
 
-      apply jit_core_one_simulation with
+      eapply jit_core_one_simulation with
         (ins := BPF_BINARY a op rd ri) (ofs0 := ofs0) (ofs1 := ofsk)
-        (st0 := st0) (st1 := stk) (st_final := st_final)(l := l2)(l1 := l3)
+        (st0 := st0) (st1 := stk) (l := l2)(ls := ls)
         (rbpf_st0 := rbpf_st0) (rbpf_st1 := rbpf_stk)
-        (old_rs := old_rs) (rs0 := rs0) (m0 := m0) (arm_blk := jit_blk)
-      in Hone_ins as Hstk_eq; auto.
+        (rs_init := rs_init) (rs0 := rs0) (m0 := m0) (sp_blk := sp_blk) (old_sp := old_sp)
+      in Hone_ins as Hstk_eq; eauto.
 
       2:{ (**r sub_mem *)
-        clear - Hofs1 Hofsk Hstk_ptr Hjit Hmem.
+        clear - Hofs0 Hofs1 Hofsk Hstk_ptr Hjit Hmem.
         assert (Hle: Z.of_nat (2 * jitted_len stk) <= Z.of_nat (2 * jitted_len st1)). {
           clear - Hjit.
           eapply jit_core_jitted_len; eauto.
@@ -3268,12 +2307,23 @@ Section JITProofWhole.
 
         eapply jit_core_sub_mem in Hjit; eauto.
         subst ofs1 ofsk.
-        eapply sub_mem_blk_less_than with (ofs1 := Z.of_nat (2 * jitted_len stk)) in Hmem; eauto.
-        eapply sub_mem_blk_trans; eauto.
+        assert (Heq: sub_mem_blk (jit_mem stk) (jit_mem st1) jit_blk ofs0 (Z.of_nat (2 * jitted_len stk))). {
+          clear - Hofs0 Hjit.
+          unfold sub_mem_blk in *.
+          intros chunk ofs Hofs.
+          eapply Hjit; eauto.
+          split; [lia |].
+          destruct Hofs as (_ & Hofs).
+          assumption.
+        }
+        eapply sub_mem_blk_less_than with (low1 := ofs0) (high1 := Z.of_nat (2 * jitted_len stk)) in Hmem; eauto.
+        - simpl in *.
+          eapply sub_mem_blk_trans; eauto.
+        - simpl in *; split; lia.
       }
-
       2:{ (**r match_state_arm *)
-        eapply exec_step; eauto.
+        constructor; try assumption; try (split; assumption).
+        eapply Hra_blk; eauto.
       }
 
       2:{ (**r ins_is_sync_regs *)
@@ -3309,9 +2359,9 @@ Section JITProofWhole.
         econstructor; eauto.
       }
 
-      destruct Hstk_eq as (rsk & Hplus & Hpre_weak & arm_memory_inv & Hmatch_state).
+      destruct Hstk_eq as (rsk & Hplus & Hpre_weak & Hstack_unchangedk & Hmatch_state).
 
-      specialize (IH rsk m0 old_rs (Z.of_nat (2 * jitted_len stk)) ofs1 Hpre_weak).
+      specialize (IH rsk m0 (Z.of_nat (2 * jitted_len stk)) ofs1 st_blk jit_blk sp_blk ra_blk old_sp).
 
       assert (Heq: Some l = Some l) by reflexivity.
       specialize (IH Heq); clear Heq.
@@ -3328,52 +2378,44 @@ Section JITProofWhole.
       }
       specialize (IH Hsub Hjit).
 
-      assert (Heq: arm_memory_inv0 stk rsk rsk m0 m0
-                flag_blk regs_blk jit_blk jit_state_blk (fun _ _ => True)). {
-        clear - Hone_ins Harm_blk Hreg_blk Hplus arm_memory_inv Hmatch_state.
-
-        destruct arm_memory_inv.
-        destruct arm_inv_stk as (Hrs13_eq & Hsp_spec).
-        destruct arm_inv_reg as (Harm_inv_reg_rs0 & Harm_inv_reg_rsk & Hperm).
-        unfold arm_stack_pointer_spec in Hsp_spec.
-        destruct Hsp_spec as (sp_blk & Hrs0_13_eq & Hneq1 & Hneq2 & Hrange_perm).
-
-        constructor; try assumption.
-        - (**r arm_stack_pointer_spec *)
-          split; [reflexivity | ].
-          unfold arm_stack_pointer_spec.
-          exists sp_blk.
-          rewrite Hrs13_eq in Hrs0_13_eq.
-          do 2 (split; [assumption | ]).
-          split; assumption.
-        - (**r arm_assume_register_map *)
-          split; [assumption | ].
-          split; assumption. (*
-        - (**r Mem.unchanged_on *)
-          rewrite <- Hrs13_eq.
-          assumption. *)
-      }
-      specialize (IH Heq); clear Heq.
-
       assert (Heq: Z.of_nat (2 * jitted_len stk) = Z.of_nat (2 * jitted_len stk)) by reflexivity.
-      specialize (IH Heq Hofs1 Hstk_ptr); clear Heq.
+      specialize (IH Heq Hofs1); clear Heq.
 
-      assert (Heq: jit_regs stk = Vptr regs_blk Ptrofs.zero). {
-        eapply bpf_alu32_to_thumb_unchange_jit_regs in Hone_ins; eauto.
-        rewrite <- Hone_ins.
-        assumption.
+      assert (Heq: sub_mem_blk (jit_mem st1) m0 jit_blk (Z.of_nat (2 * jitted_len stk)) ofs1). {
+        unfold sub_mem_blk in *.
+        intros chunk ofs Hofs.
+        erewrite Hmem; eauto.
+        apply bpf_alu32_to_thumb_jittted_len in Hone_ins.
+        destruct Hofs as (Hofs & Hofs').
+        split; lia.
       }
       specialize (IH Heq); clear Heq.
 
-      assert (Heq: regs_st rbpf_stk = Vptr regs_blk Ptrofs.zero). {
+      assert (Heq: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
+        eapply bpf_alu32_to_thumb_unchange_jittted_list in Hone_ins; eauto.
+      }
+      specialize (IH Heq); clear Heq.
+
+      assert (Heq: regs_st rbpf_stk = Vptr st_blk (Ptrofs.repr 8)). {
         clear - Hupd_reg Hreg_blk1.
         unfold upd_reg in Hupd_reg.
         destruct upd_reg'; inversion Hupd_reg.
         simpl.
         assumption.
       }
-      specialize (IH Heq Hmem); clear Heq.
+      specialize (IH Heq); clear Heq.
 
+      assert (Heq: (forall r0 : ireg, ~ In r0 ls /\ In r0 arm_callee_save_regs -> 
+        forall r1 : reg, In r1 l2 -> ireg_of_reg r1 <> r0)). {
+        intros r0 Hin0 r1 Hin1.
+        eapply Hlist_not_in1; eauto.
+      }
+      specialize (IH Heq Hstack_unchangedk); clear Heq.
+
+      rewrite Hofsk in Hmatch_state.
+      change (Z.of_nat (jitted_len stk + (jitted_len stk + 0))) with (Z.of_nat (2 * jitted_len stk)) in Hmatch_state.
+      specialize (IH Hmatch_state Hpre_weak).
+(*
       assert (Hmatch1: match_state_arm rbpf_stk rsk m0 old_rs l2 l3 jit_blk (Z.of_nat (2 * jitted_len stk)) st_final). {
         clear - Hofs0 Hofsk Hldr Hone_ins Hjit Hmatch_state.
 
@@ -3382,161 +2424,99 @@ Section JITProofWhole.
         rewrite Hofsk in HPC_eq.
         rewrite HPC_eq.
         f_equal.
-      }
+      } *)
 
-      specialize (IH Hmatch1).
-      destruct IH as (rs1 & Hstar & Hinv & Hmatch2).
+      destruct IH as (rs1 & Hstar & Hrs1_12 & Hstack_unchanged2 & Hmatch2).
+
+      destruct Hmatch2 as (Hra_blk1, Harm_reg_syn1, Harm_reg_same1, Harm_stack_syn1, (Hsp_blk1 & Harm_old_sp1),
+        Harm_pc1, Harm_valid_blk1, (Hst_blk_perm1 & Hsp_blk_perm1), Harm_reg_valid1).
+
+      destruct Hmatch_state as (Hra_blkk, Harm_reg_synk, Harm_reg_samek, Harm_stack_synk, (Hsp_blkk & Harm_old_spk),
+        Harm_pck, Harm_valid_blkk, (Hst_blk_permk & Hsp_blk_permk), Harm_reg_validk).
+
       exists rs1; split.
       + eapply star_trans with (s2 := (State rsk m0)) (t1 := E0); eauto.
         eapply plus_star; eauto.
-      + split.
-        * clear - Hinv arm_memory_inv Harm_inv.
-          destruct Hinv.
-          destruct Harm_inv.
-          destruct arm_memory_inv.
-          constructor; try assumption.
-          { (**r arm_stack_pointer_spec *)
-            split.
-            - destruct arm_inv_stk as (arm_inv_stk & _).
-              destruct arm_inv_stk1 as (arm_inv_stk1 & _).
-              rewrite arm_inv_stk1.
-              assumption.
-            - destruct arm_inv_stk0 as (_ & arm_inv_stk0).
-              assumption.
-          }
-          { (**r arm_assume_register_map *)
-            destruct arm_inv_reg as (Hrsk & Hrs1 & Hperm).
-            destruct arm_inv_reg0 as (Hrs0 & _).
-            split; [assumption | ].
-            split; assumption.
-          }
-        * clear - Hmatch2 Hldr.
-          induction Hmatch2 as [l2 l3 rbpf_st1 rs1 old_rs st_final jit_blk ofs1].
-          eapply exec_step; eauto.
+      + split; [assumption | ].
+        split; [assumption | ].
+         constructor; try assumption; try (split; assumption).
   Qed.
 
   End JITCore.
 
   Section JITStore.
-(*
-    Lemma jit_core_guarantees_jit_store_exists_vint:
-      forall r rbpf_st rs m0 old_rs l1 l2 jit_blk ofs1 st_final
-      (Hst: match_state_arm rbpf_st rs m0 old_rs l1 l2 jit_blk ofs1 st_final) (**r updated rs *)
-      (Hin: List.In r l1),
-          exists vi : int, Vint vi = rs (ireg_of_reg r).
-    Proof.
-      intros.
-      destruct Hst.
-      unfold regs_agree in Hreg_agree.
-      specialize (Hreg_agree _ Hin).
-      clear - Hreg_agree.
-      
 
-      destruct l; simpl; intros.
-      { (** l = [] *)
-        injection Hldr as Heq; subst l1.
-        inversion Hin.
-      }
-      (**r l <> [] *)
-      remember (b :: l) as bl.
-      destruct Hstep.
-      { inversion Heqbl. }
-      injection Heqbl as Hb_eq Hl_eq.
-      subst hd tl.
-      destruct Hone_step.
-      
-      simpl 
-    Qed. *)
-
-    Definition arm_registers_store_one (r: reg) (rs0: Asm.regset) (m0: mem): option mem :=
-      Mem.storev Mint32 m0
-          (Val.offset_ptr (rs0 IR12) (Ptrofs.of_intu (Int.mul (int_of_reg r) (Int.repr 8)))) (rs0 (ireg_of_reg r)).
-
-    Fixpoint arm_registers_store_aux (l: list reg) (rs0: Asm.regset) (m0: mem): option (Asm.regset * mem) :=
-      match l with
-      | [] => Some (rs0, m0)
-      | hd :: tl =>
-        match arm_registers_store_one hd rs0 m0 with
-        | Some m1 => arm_registers_store_aux tl (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)) m1
-        | None => None
-        end
-      end.
-
-    Definition arm_registers_store (l: list reg) (rs0 rs1: Asm.regset) (m0 m1: mem): Prop :=
-      match arm_registers_store_aux l rs0 m0 with
-      | Some (rs, m) => rs = rs1 /\ m = m1
-      | None => False
-      end.
-
-
-    Lemma jit_store_one_simulation: forall l0 l1 L r rbpf_st0 st0 st1 st_final rs0 ofs0 ofs1 m0 arm_blk
-      (Hpre: arm_registers_pre_weak rs0)
+    Lemma jit_store_one_simulation: forall l ls r rbpf_st0 st0 st1 rs_init rs0 m0
+      ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
       (Hupd_store : jit_alu32_thumb_upd_store r st0 = Some st1)
 
-      (Hlist_not_in: ~ List.In r l0 /\ ~ List.In r L)
-      (Hvint_r: exists vi, Vint vi = rs0 (ireg_of_reg r))
+      (Hlist_not_in: ~ List.In r l)
+      (Hnodup: NoDup l)
       (**r TODO: this should be guarantee by core stage *)
 
-      (HnodupL: NoDup L)
       (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
       (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
-      (Harm_blk: jitted_list st0 = Vptr arm_blk Ptrofs.zero)
-      (Hreg_blk: jit_regs st0 = Vptr regs_blk Ptrofs.zero)
+      (Hsub_mem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
 
-      (Harm_inv: arm_memory_inv0 st0 rs0 rs0 m0 m0
-        flag_blk regs_blk arm_blk jit_state_blk (fun b _ => b <> regs_blk))
-      (Hsub_mem: sub_mem_blk (jit_mem st1) (jit_mem st_final) arm_blk ofs1)
+      (Hlist_not_in1: forall r0, ~List.In r0 ls /\ List.In r0 arm_callee_save_regs ->
+        (forall r1, List.In r1 l -> (ireg_of_reg r1) <> r0))
 
-      (Hsyn: match_registers_syn rbpf_st0 m0 L regs_blk)
-
-      (Harm: match_state_arm rbpf_st0 rs0 m0 rs0 (r :: l0) l1 arm_blk ofs0 st_final),
+      (Hstack_unchanged: stack_unchanged ls rs_init rs0)
+      (Harm: match_state_arm rbpf_st0 rs_init rs0 m0 (r :: l) ls st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+      (Hvint_r: exists vi, Vint vi = rs0 (ireg_of_reg r))
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
         exists rs1 m1,
-          arm_registers_store_one r rs0 m0 = Some m1 /\ (*
-          upd_reg r (Val.longofintu (rs0 (ireg_of_reg r))) rbpf_st0 = Some rbpf_st1 /\ *)
+          arm_registers_store_one r rs0 m0 = Some m1 /\
           rs1 = rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize) /\
-          match_registers_syn rbpf_st0 m1 (r :: L) regs_blk /\
-          arm_registers_pre_weak rs1 /\
-          arm_memory_inv0 st1 rs0 rs1 m0 m1
-            flag_blk regs_blk arm_blk jit_state_blk (fun b _ => b <> regs_blk) /\
+          rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          stack_unchanged ls rs_init rs1 /\
           star BinSem.step ge (State rs0 m0) E0 (State rs1 m1) /\
-          match_state_arm rbpf_st0 rs1 m1 rs0 l0 l1 arm_blk ofs1 st_final.
+          match_state_arm rbpf_st0 rs_init rs1 m1 l ls st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
     Proof.
       unfold jit_alu32_thumb_upd_store, jit_alu32_thumb_load_store_template_jit.
-      unfold arm_registers_pre_weak.
+      unfold rbpf_state_inv.
 
       intros.
       exists (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)).
 
-      destruct Harm_inv.
-      destruct arm_inv_stk as (_ & Hsp_spec).
-      unfold arm_stack_pointer_spec in Hsp_spec.
-      destruct Hsp_spec as (sp_blk & Hrs13_eq & Hneq0 & Hneq1 & Hsp_range_perm).
-      destruct arm_inv_reg as (Harm_rs0 & _ & Hregs_range_perm).
+      destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
 
       unfold arm_registers_store_one.
-      rewrite Hpre.
+      rewrite Hrs0_12.
       simpl.
       rewrite Ptrofs.add_zero_l.
-      rewrite Hreg_mul8_unsigned.
+      unfold Ptrofs.of_intu, Ptrofs.of_int.
+      rewrite Int.unsigned_repr.
+      2:{
+        change Int.max_unsigned with 4294967295;
+        unfold id_of_reg; destruct r; simpl; lia.
+      }
+      rewrite Ptrofs.unsigned_repr.
+      2:{
+        change Ptrofs.max_unsigned with 4294967295;
+        unfold id_of_reg; destruct r; simpl; lia.
+      }
 
       destruct Hvint_r as (vi & Hrs0_r_eq).
       rewrite <- Hrs0_r_eq.
 
       assert (Heq: exists m1,
-        Mem.store Mint32 m0 regs_blk (8 * id_of_reg r) (Vint vi) = Some m1). {
-        clear - Hregs_range_perm.
-        assert (Heq: Mem.valid_access m0 Mint32 regs_blk (8 * id_of_reg r) Writable). {
+        Mem.store Mint32 m0 st_blk ((id_of_reg r + 1) * 8) (Vint vi) = Some m1). {
+        clear - Hst_blk_perm.
+        assert (Heq: Mem.valid_access m0 Mint32 st_blk ((id_of_reg r + 1) * 8) Writable). {
           unfold Mem.valid_access.
           split.
           - unfold Mem.range_perm in *.
             intros ofs Hrange.
-            apply Hregs_range_perm.
+            apply Hst_blk_perm.
             clear - Hrange.
             change (size_chunk Mint32) with 4 in *.
             unfold id_of_reg in *; destruct r; lia.
           - change (align_chunk Mint32) with 4.
-            replace (8 * id_of_reg r) with (4 * (2 * id_of_reg r)).
-            apply Z.divide_factor_l.
+            replace ((id_of_reg r + 1) * 8) with ((id_of_reg r + 1) * 2 * 4).
+            apply Z.divide_factor_r.
             unfold id_of_reg in *; destruct r; lia.
         }
         apply Mem.valid_access_store with (v := Vint vi) in Heq.
@@ -3558,272 +2538,137 @@ Section JITProofWhole.
         eapply upd_jitted_list_max; eauto.
       }
 
-
-      unfold upd_reg, upd_reg'.
-      unfold match_registers_syn in Hsyn.
-      destruct Hsyn as (Hreg_blk_eq & Hbpf_regs_range_perm & Hsyn). (*
-      rewrite Hreg_blk_eq.
-      unfold Mem.storev, Val.add, Archi.ptr64.
-      rewrite Ptrofs.add_zero_l.
-      rewrite ptrofs_unsigned_repr_reg_mul_8.
-      unfold Val.longofintu.
-      assert (Heq: exists m2, Mem.store Mint64
-        (bpf_m rbpf_st0) regs_blk (8 * id_of_reg r) (Vlong (Int64.repr (Int.unsigned vi))) = Some m2). {
-        clear - Hbpf_regs_range_perm.
-        assert (Heq: Mem.valid_access (bpf_m rbpf_st0) Mint64 regs_blk (8 * id_of_reg r) Writable). {
-          unfold Mem.valid_access.
-          split.
-          - unfold Mem.range_perm in *.
-            intros ofs Hrange.
-            apply Hbpf_regs_range_perm.
-            clear - Hrange.
-            change (size_chunk Mint64) with 8 in *.
-            unfold id_of_reg in *; destruct r; lia.
-          - change (align_chunk Mint64) with 8.
-            apply Z.divide_factor_l.
-        }
-        apply Mem.valid_access_store with (v := Vlong (Int64.repr (Int.unsigned vi))) in Heq.
-        destruct Heq as (m2 & Hstore).
-        exists m2; assumption.
-      }
-      destruct Heq as (m2 & Hstore_bpf).
-      rewrite Hstore_bpf.
-      exists (upd_mem m2 rbpf_st0). *)
-
+      (**r Mem.store *)
       split; [assumption | ].
-(*
-      split.
-      {
-        unfold upd_mem.
-        rewrite Hreg_blk_eq.
-        reflexivity.
-      } *)
-
+      (**r rs0 # PC *)
       split; [reflexivity | ].
 
-      remember (r :: l0) as el.
-      set (old_rs := rs0).
-      assert (Heq: match_state_arm rbpf_st0 rs0 m0 old_rs el l1 arm_blk ofs0 st_final) by auto.
-      clear Harm; rename Heq into Harm.
-      assert (Hrs_eq: old_rs = rs0) by auto.
-
-      destruct Harm as (el, l1, rbpf_st0, rs0, old_rs, st_final, arm_blk, ofs0, m0, Hagree, Harm_syn, HPC_eq, Hvalid, Hunchanged0, Hunchanged1).
-      subst old_rs el.
-
       split.
-      { (**r match_registers_syn *)
-        unfold match_registers_syn.
-        split; [assumption | ].
-        split; [assumption | ].
-        intros r0.
-        specialize (Hsyn r0).
-        destruct Hsyn as (vj & Heval_reg & Haxiom & HinL).
-
-        destruct (reg_eqb r r0) eqn: Hreg_eq;
-          [ rewrite <- reg_eqb_true in Hreg_eq |
-            rewrite <- reg_eqb_false in Hreg_eq ].
-        - subst r0.
-          exists vi.
-          split.
-          + rewrite Heval_reg.
-            unfold regs_agree in Hagree.
-            assert (Heq: In r (r :: l0)) by (left; reflexivity).
-            specialize (Hagree r Heq); clear Heq.
-            unfold eval_reg.
-
-            destruct Hagree as (vk & Hrs_eq & Heval_regk).
-            rewrite <- Hrs0_r_eq in Hrs_eq.
-            injection Hrs_eq as Heq.
-            subst vk.
-            specialize (Haxiom vi Heval_regk).
-            subst vj.
-            reflexivity.
-          + split.
-            * intros vt Heval_regt.
-
-              unfold regs_agree in Hagree.
-              assert (Heq: In r (r :: l0)) by (left; reflexivity).
-              specialize (Hagree r Heq); clear Heq.
-              destruct Hagree as (vk & Hrs_eq & Heval_regk).
-              rewrite <- Hrs0_r_eq in Hrs_eq.
-              injection Hrs_eq as Heq.
-              subst vk.
-              specialize (Haxiom vi Heval_regk) as Heq.
-              specialize (Haxiom vt Heval_regt).
-              subst vj vt.
-              reflexivity.
-            * intros Hin.
-              destruct Hin as [Hr_eq | Hin].
-              { erewrite Mem.load_store_same; eauto.
-                f_equal.
-              }
-              exfalso.
-              destruct Hlist_not_in as (_ & Hnot_in).
-              apply Hnot_in; assumption.
-        - exists vj.
-          split; [assumption | ].
-          split; [assumption | ].
-
-          intro Hin.
-          destruct Hin as [Hr_eq | Hin].
-          + exfalso.
-            apply Hreg_eq.
-            assumption.
-          + specialize (HinL Hin).
-            rewrite <- HinL.
-            eapply Mem.load_store_other; eauto.
-            right.
-            change (size_chunk Mint32) with 4.
-            clear - Hreg_eq.
-            unfold id_of_reg.
-            destruct r; destruct r0; try lia.
-            all: exfalso; apply Hreg_eq; reflexivity.
-      }
-
-      split.
-      { (**r rs0 # PC *)
+      { (**r rs0 # IR12 *)
         rewrite Pregmap.gso; [| intro HF; inversion HF].
         assumption.
       }
 
+      unfold JITTED_LIST_MAX_LENGTH in Hle.
+      assert (Hlen_eq0: Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))). {
+        rewrite Ptrofs.unsigned_repr.
+        reflexivity.
+        change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+
+      assert (Hlen_eq1: Ptrofs.unsigned (Ptrofs.add 
+          (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) (Ptrofs.of_int (Int.repr 2))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2)). {
+        unfold Ptrofs.add.
+        change (Ptrofs.unsigned (Ptrofs.of_int (Int.repr 2))) with 2.
+        rewrite Ptrofs.unsigned_repr.
+        - rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+        - change Ptrofs.max_unsigned with 4294967295.
+          rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+
       split.
-      { (**r arm_memory_inv0 *)
-        constructor.
-        - (**r arm_stack_pointer_spec *)
-          split.
-          + rewrite Pregmap.gso; [| intro HF; inversion HF].
-            reflexivity.
-          + unfold arm_stack_pointer_spec.
-            exists sp_blk.
-            repeat (split; [assumption | ]).
-            assumption.
-        - (**r arm_assume_register_map *)
-          split; [assumption | ].
-          split; [ | assumption].
-          unfold arm_assume_register_map.
-          intros.
-          unfold arm_assume_register_map in Harm_rs0.
-          specialize (Harm_rs0 r0).
-          destruct r0.
-          * rewrite Pregmap.gso; [assumption | intro HF; inversion HF].
-          * rewrite Pregmap.gso; [assumption | intro HF; inversion HF].
-          * rewrite Pregmap.gso; [assumption | intro HF; inversion HF].
-          * rewrite Pregmap.gss.
-            rewrite HPC_eq; simpl.
-            auto.
-        - (**r jit_state_memory_layout *)
-          unfold jit_state_memory_layout in *.
-          destruct arm_inv_st as (Hload & Hlayout).
-          split; [assumption | ].
-          unfold regs_layout in *.
-          intros r0.
-          specialize (Hlayout r0).
-          destruct Hlayout as (v & Heval0 & Hload64 & Hload32 & Haxiom).
-          exists v.
-          split.
-          + rewrite <- Heval0.
-            symmetry.
-            eapply upd_jitted_list_unchange_eval_jit_reg_2; eauto.
-            clear - Hneq1; unfold block_neq in Hneq1; intuition.
-          + split; [assumption | ].
-            split; [assumption | ].
-            intros vj Heval.
-            apply Haxiom.
-            rewrite <- Heval.
-            eapply upd_jitted_list_unchange_eval_jit_reg_2; eauto.
-            clear - Hneq1; unfold block_neq in Hneq1; intuition.
-        - (**r Mem.unchanged_on *)
-          eapply Mem.store_unchanged_on; eauto.
+      { (**r stack_unchanged *)
+        unfold stack_unchanged in *.
+        intros r0 Hin0.
+        rewrite Pregmap.gso; [ | intro HF; inversion HF].
+        eapply Hstack_unchanged; eauto.
       }
 
       split.
       { (**r star BinSem.step *)
 
         eapply star_one.
-        eapply exec_step_bin.
+        eapply exec_step_bin with (w := true)
+          (i := Pstr (ireg_of_reg r) IR12 (SOimm (Int.repr ((id_of_reg r + 1) * 8)))).
         - (**r find_instr *)
-          instantiate (2 := Pstr (ireg_of_reg r) IR12 (SOimm (Int.mul (int_of_reg r) (Int.repr 8)))).
-          instantiate (1 := true).
+          rewrite Harm_pc.
 
-          rewrite HPC_eq.
-
-          assert (Heq: find_instr (Vptr arm_blk (Ptrofs.repr ofs0)) (jit_mem st_final) =
-                        find_instr (Vptr arm_blk (Ptrofs.repr ofs0)) m0). {
+          assert (Heq: find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) m0 =
+            find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st1)). {
             unfold find_instr.
-            simpl.
-            erewrite <- Mem.load_unchanged_on_1; eauto.
-
-            - (**r Mem.load *)
-              destruct Mem.load eqn: Hload; [| reflexivity].
-              erewrite <- Mem.load_unchanged_on_1; eauto.
-              (**r block neq *)
-              intros ofs Hofs_range.
-              simpl.
-              split.
-              + clear - Hneq1.
-                unfold block_neq in Hneq1; intuition.
-              + rewrite Hrs13_eq.
-                unfold not_stack_blk; simpl.
-                clear - Hneq0; intuition.
-            - (**r block neq *)
-              intros ofs Hofs_range.
-              simpl.
-              split.
-              + clear - Hneq1.
-                unfold block_neq in Hneq1; intuition.
-              + rewrite Hrs13_eq.
-                unfold not_stack_blk; simpl.
-                clear - Hneq0; intuition.
-          }
-          rewrite <- Heq; clear Heq.
-
-          assert (Heq: find_instr (Vptr arm_blk (Ptrofs.repr ofs0)) (jit_mem st_final) =
-                        find_instr (Vptr arm_blk (Ptrofs.repr ofs0)) (jit_mem st1)). {
-
-            unfold find_instr.
-            simpl.
             unfold sub_mem_blk in Hsub_mem.
-            erewrite Hsub_mem; eauto.
-            destruct Mem.load eqn: Hload; [| reflexivity].
-            - erewrite Hsub_mem; eauto.
-              rewrite <- Hst0_eq in Hofs1.
-              rewrite Hofs1, Hofs0.
 
-              unfold Ptrofs.add.
-              destruct upd_jitted_list eqn: Hupd; [| inversion Hupd_store].
-              erewrite upd_jitted_list_unsigned_repr_add_2; eauto.
+            eapply upd_jitted_list_2_load with (jit_blk := jit_blk) in Hupd_store as Hload; eauto.
+            eapply upd_jitted_list_2_load_2 with (jit_blk := jit_blk) in Hupd_store as Hload2; eauto.
+
+            simpl.
+            rewrite Hofs0; simpl.
+            rewrite <- Hsub_mem.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hst0_eq.
+              rewrite Hlen_eq0.
               change (size_chunk Mint16unsigned) with 2.
               lia.
-            - rewrite <- Hst0_eq in Hofs1.
-              rewrite Hofs1, Hofs0.
+            }
 
-              destruct upd_jitted_list eqn: Hupd; [| inversion Hupd_store].
-              erewrite upd_jitted_list_unsigned_repr; eauto.
+            unfold Ptrofs.of_int in Hload.
+            rewrite Int.unsigned_repr in Hload.
+            2:{ change Int.max_unsigned with 4294967295; lia. }
+            rewrite Hload.
+            simpl.
+            rewrite <- Hsub_mem.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hst0_eq.
+              rewrite Hlen_eq1.
               change (size_chunk Mint16unsigned) with 2.
               lia.
+            }
+            unfold Ptrofs.of_int in Hload2.
+            rewrite Int.unsigned_repr in Hload2.
+            2:{ change Int.max_unsigned with 4294967295; lia. }
+            unfold Ptrofs.of_int.
+            change (Int.unsigned (Int.repr 2)) with 2.
+            rewrite Hload2.
+            simpl.
+            reflexivity.
           }
-          rewrite Heq; clear Heq.
+          rewrite Heq.
           eapply lemma_thumb_str; eauto.
-          change (Int.unsigned (Int.repr 8)) with 8.
-          unfold int_of_reg.
-          rewrite Int.unsigned_repr;
-            [| change Int.max_unsigned with 4294967295];
-            unfold id_of_reg; destruct r; simpl; lia.
-          unfold int_of_ireg.
-          change (Z.of_nat (ireg2nat IR12)) with 12.
-          unfold Int.mul in Hupd_store.
-          replace (ireg2nat (ireg_of_reg r)) with (reg2nat r).
-          unfold int_of_reg.
-          replace (id_of_reg r) with (Z.of_nat (reg2nat r)).
-          assumption.
-          unfold reg2nat, id_of_reg; destruct r; lia.
-          unfold reg2nat, ireg2nat, ireg_of_reg; destruct r; lia.
+
+          + unfold id_of_reg.
+            destruct r; simpl; lia.
+          + clear - Hupd_store.
+            unfold int_of_ireg.
+            change (Z_of_ireg IR12) with 12.
+            assert (Heq: (int_of_reg r) = (Int.repr (Z_of_ireg (ireg_of_reg r)))).
+            { unfold int_of_reg, id_of_reg, Z_of_ireg, ireg_of_reg.
+              f_equal.
+              destruct r; reflexivity.
+            }
+            rewrite <- Heq; clear Heq.
+            assert (Heq: Int.add (Int.mul (int_of_reg r) (Int.repr 8)) (Int.repr 8) = 
+              Int.repr ((id_of_reg r + 1) * 8)). {
+              unfold Int.add, Int.mul.
+              f_equal.
+              change (Int.unsigned (Int.repr 8)) with 8.
+              unfold int_of_reg, id_of_reg; rewrite Int.unsigned_repr.
+              - rewrite Int.unsigned_repr; [lia | ].
+                change Int.max_unsigned with 4294967295; destruct r; simpl; lia.
+              - rewrite Int.unsigned_repr;
+                change Int.max_unsigned with 4294967295; destruct r; simpl; lia.
+            }
+            rewrite <- Heq.
+            assumption.
         - (**r exec_instr *)
           simpl.
-          rewrite Hpre; simpl.
+          rewrite Hrs0_12; simpl.
           rewrite Ptrofs.add_zero_l.
           unfold exec_store; simpl.
-          rewrite Hreg_mul8_unsigned.
+          unfold Ptrofs.of_int.
+          rewrite Int.unsigned_repr.
+          2:{ unfold id_of_reg.
+            change Int.max_unsigned with 4294967295; destruct r; simpl; lia.
+          }
+          rewrite Ptrofs.unsigned_repr.
+          2:{ unfold id_of_reg.
+            change Ptrofs.max_unsigned with 4294967295; destruct r; simpl; lia.
+          }
           rewrite <- Hrs0_r_eq.
           rewrite Hstore.
           f_equal.
@@ -3833,36 +2678,65 @@ Section JITProofWhole.
 
         constructor; try assumption.
         + (**r regs_agree *)
-          unfold regs_agree in Hagree.
+          unfold regs_agree in Harm_reg_syn.
           unfold regs_agree.
+          destruct Harm_reg_syn as (Harm_reg_syn & _).
+          split; [| assumption].
           intros r0 Hin.
-          assert (Heq: In r0 (r :: l0)) by (right; assumption).
-          specialize (Hagree r0 Heq); clear Heq.
+          assert (Heq: In r0 (r :: l)) by (right; assumption).
+          specialize (Harm_reg_syn r0 Heq); clear Heq.
           rewrite Pregmap.gso; [ | intro HF; inversion HF].
           assumption.
+        + (**r regs_unchanged *)
+          unfold regs_unchanged in *.
+          intros r0 HT.
+          destruct (reg_eqb r r0) eqn: Heq; [ rewrite <- reg_eqb_true in Heq | rewrite <- reg_eqb_false in Heq].
+          {
+            subst r0.
+            exists vi.
+            unfold regs_agree in Harm_reg_syn.
+            destruct Harm_reg_syn as (Harm_reg_syn & _).
+            assert (Heq: In r (r :: l)) by (left; reflexivity).
+            specialize (Harm_reg_syn _ Heq).
+            destruct Harm_reg_syn as (vj & Heq1 & Heq2).
+            rewrite Heq1 in Hrs0_r_eq.
+            injection Hrs0_r_eq as Hr_eq; subst vj.
+            eapply llvm_enable_alu32 in Heq2; eauto.
+            split. apply Heq2.
+            replace (8 * id_of_reg r + 8) with ((id_of_reg r + 1) * 8).
+            erewrite Mem.load_store_same; eauto.
+            f_equal.
+            destruct r; simpl; lia.
+          }
+          assert (Hneq: ~ In r0 (r :: l)). {
+            intros HF.
+            apply HT.
+            destruct HF as [Hneq | Hin]; [| assumption].
+            exfalso; apply Heq. assumption.
+          }
+          specialize (Harm_reg_same _ Hneq).
+          destruct Harm_reg_same as (vj & Hload1 & Hload2).
+          exists vj.
+          split; [assumption | ].
+          rewrite <- Hload2.
+          erewrite Mem.load_store_other; eauto.
+          right.
+          change (size_chunk Mint32) with 4.
+          clear - Heq.
+          destruct r0; destruct r; simpl; try lia.
+          all: exfalso; apply Heq; reflexivity.
         + (**r arm_synch_stack *)
-
           unfold arm_synch_stack in *.
           rewrite Pregmap.gso; [ | intros HF; inversion HF].
+          destruct Harm_stack_syn as (Harm_stack_syn & Hnodup_ls).
+          split; [| assumption].
 
-          rewrite Hrs13_eq in *.
-
-          destruct Harm_syn as (Hload & Hstack).
-          simpl in Hload.
-          split.
-          {
-            simpl.
-            rewrite <- Hload.
-            clear - Hneq0 Hstore.
-            eapply Mem.load_store_other; eauto.
-            left.
-            intuition.
-          }
+          rewrite Hsp_blk in *.
 
           intros r0 Hin.
           simpl.
-          specialize (Hstack r0 Hin).
-          rewrite <- Hstack.
+          specialize (Harm_stack_syn r0 Hin).
+          rewrite <- Harm_stack_syn.
           rewrite Ptrofs.add_zero_l.
           rewrite Hreg_mul4_unsigned.
           simpl.
@@ -3870,70 +2744,64 @@ Section JITProofWhole.
           rewrite Hreg_mul4_unsigned.
           erewrite Mem.load_store_other; eauto.
           left.
-          clear - Hneq0; intuition.
+          clear - Harm_valid_blk.
+          intuition.
+
+        + (**r rs IR13 *)
+          rewrite Pregmap.gso; [| intros HF; inversion HF].
+          split; [assumption | ].
+          rewrite Hsp_blk in *.
+          rewrite <- Harm_old_sp.
+          simpl.
+          erewrite Mem.load_store_other; eauto.
+          left.
+          clear - Harm_valid_blk.
+          intuition.
 
         + (**r rs PC *)
-          rewrite HPC_eq.
+          rewrite Harm_pc.
           rewrite Pregmap.gss.
           unfold Val.offset_ptr.
           f_equal.
-          rewrite <- Hst0_eq in Hofs1.
-          rewrite Hofs1, Hofs0.
-          unfold Ptrofs.add.
-
-          destruct upd_jitted_list eqn: Hupd; [| inversion Hupd_store].
-          erewrite upd_jitted_list_unsigned_repr; eauto.
-
-          f_equal.
-          change (Ptrofs.unsigned wsize) with 4.
+          unfold wsize.
+          eapply add_ofs_4; eauto.
           lia.
 
-        + (**r Mem.unchanged_on *)
-          rewrite Pregmap.gso; [| intros HF; inversion HF].
-          eapply store_unchanged_on_3; eauto.
-          intros ofs2 HF.
-          destruct HF as (HF & _).
-          apply HF.
-          reflexivity.
-
-        + (**r Mem.unchanged_on *)
-          rewrite Pregmap.gso; [| intros HF; inversion HF].
-          eapply store_unchanged_on_4; eauto.
-          intros ofs2 HF.
-          destruct HF as (HF & _).
-          apply HF.
-          reflexivity.
+        + (**r Harm_valid_blk *)
+          destruct Harm_valid_blk as (Hneq & Hvalid0 & Hvalid1 & Hvalid2).
+          split; [assumption | ].
+          repeat split; (eapply Mem.store_valid_block_1; eauto).
+        + (**r Mem.range_perm *)
+          unfold Mem.range_perm in *.
+          clear - Hst_blk_perm Hsp_blk_perm Hstore.
+          split; intros ofs Hofs; eapply Mem.perm_store_1; eauto.
       }
     Qed.
-(*
-    Lemma jit_store_simulation: forall l0 l l1 L l2 rbpf_st0 st0 st1 st_final rs0 ofs0 ofs1 m0
-      (Hpre: arm_registers_pre_weak rs0)
-      (Hstr: jit_alu32_store_list l = Some l0)
+
+    Lemma jit_store_simulation: forall l0 l ls rbpf_st st0 st1 rs_init rs0 m0 ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
+      (Hstr: jit_alu32_store_list l = Some l0) (*
       (Hcomple: complementary_reg_list l0 L = l2)
       (HnoemptyL: L <> [])
-      (HnodupL: NoDup L)
+      (HnodupL: NoDup L) *)
       (Hjit_store : jit_alu32_thumb_store l0 st0 = Some st1)
 
       (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
       (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
-      (Harm_blk: jitted_list st0 = Vptr jit_blk Ptrofs.zero)
-      (Hreg_blk: jit_regs st0 = Vptr regs_blk Ptrofs.zero)
+      (Hsub_mem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
 
-      (Harm_inv: arm_memory_inv0 st0 rs0 rs0 m0 m0
-        flag_blk regs_blk jit_blk jit_state_blk (fun b _ => b <> regs_blk))
-      (Hsub_mem: sub_mem_blk (jit_mem st1) (jit_mem st_final) jit_blk ofs1)
 
-      (Hsyn: match_registers_syn rbpf_st0 m0 l2 regs_blk)
-
-      (Harm: match_state_arm rbpf_st0 rs0 m0 rs0 l0 l1 jit_blk ofs0 st_final),
+      (Hlist_not_in1: forall r0, ~List.In r0 ls /\ List.In r0 arm_callee_save_regs ->
+        (forall r1, List.In r1 l0 -> (ireg_of_reg r1) <> r0))
+      (Hstack_unchanged: stack_unchanged ls rs_init rs0)
+      (Harm: match_state_arm rbpf_st rs_init rs0 m0 l0 ls st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
         exists rs1 m1,
           arm_registers_store l0 rs0 rs1 m0 m1 /\
-          match_registers_syn rbpf_st0 m1 L regs_blk /\
-          arm_registers_pre_weak rs1 /\
-          arm_memory_inv0 st1 rs0 rs1 m0 m1
-            flag_blk regs_blk jit_blk jit_state_blk (fun b _ => b <> regs_blk) /\
+          rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          stack_unchanged ls rs_init rs1 /\
           star BinSem.step ge (State rs0 m0) E0 (State rs1 m1) /\
-          match_state_arm rbpf_st0 rs1 m1 rs0 [] l1 jit_blk ofs1 st_final.
+          match_state_arm rbpf_st rs_init rs1 m1 [] ls st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
     Proof.
       induction l0; simpl; intros.
       { (**r l = [] *)
@@ -3941,17 +2809,10 @@ Section JITProofWhole.
         simpl.
         exists rs0. exists m0.
         split; [split; reflexivity | ].
-        split.
-        { unfold complementary_reg_list in Hstr.
-          simpl in Hstr.
-          apply filter_true_same in Hcomple.
-          subst L.
-          assumption.
-        }
+        split; [assumption | ].
         split; [assumption | ].
         injection Hjit_store as Heq.
         subst st1.
-        split; [assumption | ].
         split; [econstructor; eauto | ].
 
         rewrite <- Hofs1 in Hofs0.
@@ -3969,112 +2830,88 @@ Section JITProofWhole.
         eapply jit_alu32_store_list_tl; eauto.
       }
       destruct Hexists_l as (lr & Hexists_l).
-      specialize (IHl0 lr l1 L (complementary_reg_list l0 L) rbpf_st0 stk st1 st_final).
+      specialize (IHl0 lr ls rbpf_st stk st1 rs_init).
 
       destruct jit_alu32_store_list eqn: Hnl1 in Hstr; [| inversion Hstr].
       rename l0 into nl1.
-(*
-      remember (rs0 # PC <- (Val.offset_ptr (rs0 PC) wsize)) as rsk. *)
 
-      assert (Hreg_val: exists vi : int, Vint vi = rs0 (ireg_of_reg a)). { (*
-        subst rsk. *)
-        clear - Harm.
-        remember (a :: nl1) as al.
-        set (old_rs := rs0).
-        assert (Heq_rs: old_rs = rs0) by auto.
-        assert (Heq: match_state_arm rbpf_st0 rs0 m0 old_rs al l1 jit_blk ofs0 st_final) by auto.
-        clear Harm; rename Heq into Harm.
-        destruct Harm.
-        subst lsr old_rs; clear - Hreg_agree.
-        unfold regs_agree in Hreg_agree.
+
+      destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
+
+      assert (Hst0_eq: S (S (jitted_len st0)) = jitted_len stk). {
+        clear - Hupd_store.
+        unfold jit_alu32_thumb_upd_store, jit_alu32_thumb_load_store_template_jit in Hupd_store.
+        eapply upd_jitted_list_jittted_len_2; eauto.
+      }
+
+      assert (Hle: Z.of_nat (2 * jitted_len st0) <= Z.of_nat JITTED_LIST_MAX_LENGTH). {
+        clear - Hupd_store.
+        unfold jit_alu32_thumb_upd_store, jit_alu32_thumb_load_store_template_jit in Hupd_store.
+        destruct upd_jitted_list eqn: Hupd; [| inversion Hupd_store].
+        eapply upd_jitted_list_max; eauto.
+      }
+      unfold JITTED_LIST_MAX_LENGTH in Hle.
+
+      assert (Hlen_eq0: Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))). {
+        rewrite Ptrofs.unsigned_repr.
+        reflexivity.
+        change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+
+      assert (Hlen_eq1: Ptrofs.unsigned (Ptrofs.add 
+          (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) (Ptrofs.of_int (Int.repr 2))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2)). {
+        unfold Ptrofs.add.
+        change (Ptrofs.unsigned (Ptrofs.of_int (Int.repr 2))) with 2.
+        rewrite Ptrofs.unsigned_repr.
+        - rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+        - change Ptrofs.max_unsigned with 4294967295.
+          rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+      unfold rbpf_state_inv in *.
+
+      eapply jit_store_one_simulation with
+        (l := nl1) (ls := ls)
+        (rbpf_st0 := rbpf_st) (rs_init := rs_init)
+        (rs0 := rs0) (m0 := m0) (ofs0 := ofs0) (ofs1 := Z.of_nat (2 * jitted_len stk))
+        (st_blk := st_blk) (jit_blk := jit_blk) (sp_blk := sp_blk) (old_sp := old_sp) in Hupd_store as Hone_step; eauto.
+
+      6:{ (**r rs0 (ireg_of_reg a) *)
+        clear - Harm_reg_syn.
+        unfold regs_agree in Harm_reg_syn.
         assert (Hin: In a (a :: nl1)) by (left; reflexivity).
-        specialize (Hreg_agree _ Hin).
-        destruct Hreg_agree as (vi & Heq & _). (*
-        rewrite Pregmap.gso; [ | intros HF; inversion HF]. *)
+        destruct Harm_reg_syn as (Harm_reg_syn & _).
+        specialize (Harm_reg_syn _ Hin).
+        destruct Harm_reg_syn as (vi & Heq & _).
         exists vi; rewrite Heq; reflexivity.
       }
 
-      destruct Hreg_val as (v & Hreg_val).
-
-(*
-      unfold arm_registers_store; simpl.
-
-      assert (Heq: exists mk, arm_registers_store_one a rs0 m0 = Some mk). {
-        unfold arm_registers_store_one.
-        unfold arm_registers_pre_weak in Hpre.
-        rewrite Hpre.
-        simpl.
-        rewrite Ptrofs.add_zero_l.
-        rewrite Hreg_mul8_unsigned.
-        assert (Heq: rs0 (ireg_of_reg a) = Vint v). {
-          subst rsk.
-          rewrite Pregmap.gso in Hreg_val; [ | intros HF; inversion HF].
-          rewrite Hreg_val; reflexivity.
-        }
-        rewrite Heq; clear Heq.
-        clear - Harm_inv.
-        destruct Harm_inv.
-        clear - arm_inv_reg.
-        destruct arm_inv_reg as (_ & _ & Hrange_perm).
-        unfold Mem.range_perm in Hrange_perm.
-        assert (Heq: 0 <=  (8 * id_of_reg a) < 88). {
-          unfold id_of_reg; destruct a; lia.
-        }
-        assert (Haccess: Mem.valid_access m0 Mint32 regs_blk (8 * id_of_reg a) Writable). {
-          unfold Mem.valid_access.
-          split.
-          - unfold Mem.range_perm in *.
-            intros ofs Hrange.
-            apply Hrange_perm.
-            clear - Hrange.
-            change (size_chunk Mint32) with 4 in *.
-            unfold id_of_reg in *; destruct a; lia.
-          - change (align_chunk Mint32) with 4.
-            replace (8 * id_of_reg a) with (4 * (2 * id_of_reg a)).
-            apply Z.divide_factor_l.
-            unfold id_of_reg in *; destruct a; lia.
-        }
-        apply Mem.valid_access_store with (v := Vint v) in Haccess.
-        destruct Haccess as (mk & Hstore).
-        exists mk; assumption.
-      }
-      destruct Heq as (mk & Hstore_one).
-      rewrite Hstore_one. *)
-
-      eapply jit_store_one_simulation with
-        (l0 := nl1) (l1 := l1) (L := l2)
-        (rbpf_st0 := rbpf_st0) (st_final := st_final)
-        (rs0 := rs0) (ofs0 := ofs0) (ofs1 := Z.of_nat (2 * jitted_len stk))
-        (m0 := m0) (arm_blk := jit_blk) in Hupd_store as Hone_step; eauto.
       - (**r MAIN *)
-        destruct Hone_step as (rsk & mk & Hstorek & Hrsk_eq & Hreg_synk & Hprek 
-          & Hinvk & Hstark & Hmatch_statek).
+        destruct Hone_step as (rsk & mk & Hstorek & Hrsk_eq & Hrsk_12 & Hstack_unchangedk & Hstark & Hmatch_statek).
 
         unfold arm_registers_store_one in Hstorek.
 
-        unfold arm_registers_pre_weak in Hpre.
-        rewrite Hpre in Hstorek.
+        rewrite Hrs0_12 in *.
         simpl in Hstorek.
         rewrite Ptrofs.add_zero_l in Hstorek.
-        rewrite <- Hreg_val in Hstorek.
-        rewrite Hreg_mul8_unsigned in Hstorek.
-        specialize (IHl0 rsk).
-        specialize (IHl0  (Z.of_nat (2 * jitted_len stk)) ).
-        specialize (IHl0 (Z.of_nat (2 * jitted_len st1)) ).
-        specialize (IHl0 mk).
-(*
-        assert (Heq: arm_registers_pre_weak rsk). {
-          subst rsk.
-          clear - Hpre.
-          unfold arm_registers_pre_weak in *.
-          rewrite Pregmap.gso; [ | intros HF; inversion HF].
-          assumption.
-        } *)
-        specialize (IHl0 Hprek).
-        specialize (IHl0 Hexists_l).
+        unfold Ptrofs.of_intu, Ptrofs.of_int in Hstorek.
+        rewrite Int.unsigned_repr in Hstorek.
+        2:{ unfold id_of_reg.
+          change Int.max_unsigned with 4294967295; destruct a; simpl; lia.
+        }
+        rewrite Ptrofs.unsigned_repr in Hstorek.
+        2:{ unfold id_of_reg.
+          change Ptrofs.max_unsigned with 4294967295; destruct a; simpl; lia.
+        }
 
-        assert (Heq: complementary_reg_list nl1 L = complementary_reg_list nl1 L) by auto.
-        specialize (IHl0 Heq HnoemptyL HnodupL Hjit_store); clear Heq.
+        specialize (IHl0 rsk mk).
+        specialize (IHl0  (Z.of_nat (2 * jitted_len stk)) ).
+        specialize (IHl0 (Z.of_nat (2 * jitted_len st1)) st_blk jit_blk sp_blk ra_blk old_sp).
+        specialize (IHl0 Hexists_l Hjit_store).
 
         assert (Heq: Z.of_nat (2 * jitted_len stk) = Z.of_nat (2 * jitted_len stk)) by auto.
         specialize (IHl0 Heq); clear Heq.
@@ -4082,353 +2919,1349 @@ Section JITProofWhole.
         assert (Heq: Z.of_nat (2 * jitted_len st1) = Z.of_nat (2 * jitted_len st1)) by auto.
         specialize (IHl0 Heq); clear Heq.
 
+        assert (Heq: sub_mem_blk (jit_mem st1) mk jit_blk (Z.of_nat (2 * jitted_len stk)) (Z.of_nat (2 * jitted_len st1))). {
+          unfold sub_mem_blk in *.
+          intros chunk ofs Hofs.
+          destruct Hofs as (Hofs & Hofs').
+          erewrite Hsub_mem; eauto.
+          - symmetry.
+            erewrite Mem.load_store_other; eauto.
+            left.
+            clear - Harm_valid_blk; intuition.
+          - rewrite Hofs1.
+            split; lia.
+        }
+        specialize (IHl0 Heq); clear Heq.
+
         assert (Heq: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
           unfold jit_alu32_thumb_upd_store, jit_alu32_thumb_load_store_template_jit in Hupd_store.
           eapply upd_jitted_list_unchange_jittted_list_2 in Hupd_store; eauto.
-          rewrite <- Hupd_store.
-          assumption.
+          rewrite <- Hupd_store; assumption.
         }
         specialize (IHl0 Heq); clear Heq.
 
-        assert (Heq: jit_regs stk = Vptr regs_blk Ptrofs.zero). {
-          unfold jit_alu32_thumb_upd_store, jit_alu32_thumb_load_store_template_jit in Hupd_store.
-          eapply upd_jitted_list_unchange_jit_regs_2 in Hupd_store; eauto.
-          rewrite <- Hupd_store.
-          assumption.
+        assert (Heq: (forall r0 : ireg, ~ In r0 ls /\ In r0 arm_callee_save_regs ->
+          forall r1 : reg, In r1 nl1 -> ireg_of_reg r1 <> r0)). {
+          intros r0 Hin0 r Hin1.
+          eapply Hlist_not_in1; eauto.
         }
-        specialize (IHl0 Heq); clear Heq.
+        specialize (IHl0 Heq Hstack_unchangedk); clear Heq.
 
-        assert (Heq: arm_memory_inv0 stk rsk rsk mk mk
-                  flag_blk regs_blk jit_blk jit_state_blk  (fun (b : block) (_ : Z) => b <> regs_blk)). {
-          subst rsk.
-          clear - Hupd_store Harm_blk Hreg_blk Harm_inv Hstorek.
+        destruct Hmatch_statek as (Hra_blkk, Harm_reg_synk, Harm_reg_samek, Harm_stack_synk, (Hsp_blkk & Harm_old_spk),
+                Harm_pck, Harm_valid_blkk, (Hst_blk_permk & Hsp_blk_permk), Harm_reg_validk).
 
-          set (old_rs := rs0).
-          assert (Heq: arm_memory_inv0 st0 rs0 old_rs m0 m0
-            flag_blk regs_blk jit_blk jit_state_blk (fun (b : block) (_ : Z) => b <> regs_blk)) by auto.
-          clear Harm_inv; rename Heq into Harm_inv.
-          assert (Heq0: old_rs = rs0) by auto.
-
-          set (m := m0).
-          assert (Heq: arm_memory_inv0 st0 rs0 old_rs m0 m
-            flag_blk regs_blk jit_blk jit_state_blk (fun (b : block) (_ : Z) => b <> regs_blk)) by auto.
-          clear Harm_inv; rename Heq into Harm_inv.
-          assert (Heq1: m = m0) by auto.
-
-          destruct Harm_inv.
-          subst m old_rs.
-          destruct arm_inv_stk as (_ & Hsp_spec).
-          unfold arm_stack_pointer_spec in Hsp_spec.
-          destruct Hsp_spec as (sp_blk & Hrs_eq & Hneq0 & Hneq1 & Hperm).
-
-          constructor; try assumption.
-          - (**r PC + arm_stack_pointer_spec *)
-            split; [f_equal | ].
-            unfold arm_stack_pointer_spec in *.
-            exists sp_blk.
-            split.
-            + rewrite Pregmap.gso; [ | intros HF; inversion HF].
-              assumption.
-            + split; [assumption | ].
-              split; [assumption | ].
-              clear - Hstorek Hperm.
-              unfold Mem.range_perm in *.
-              intros ofs Hofs.
-              specialize (Hperm _ Hofs).
-              eapply Mem.perm_store_1; eauto.
-          - (**r arm_assume_register_map *)
-            destruct arm_inv_reg as (Harm_inv_reg0 & _ & Hrange_perm).
-            split.
-            + unfold arm_assume_register_map in *.
-              intros r.
-              specialize (Harm_inv_reg0 r).
-              destruct r.
-              * rewrite Pregmap.gso; [ | intros HF; inversion HF].
-                assumption.
-              * repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              * repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-              * rewrite Pregmap.gss; auto.
-                unfold Val.offset_ptr; destruct (rs0 PC); auto.
-            + split.
-              {
-                unfold arm_assume_register_map in *.
-                intros r.
-                specialize (Harm_inv_reg0 r).
-                destruct r.
-                * rewrite Pregmap.gso; [ | intros HF; inversion HF].
-                  assumption.
-                * repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-                * repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]); assumption.
-                * rewrite Pregmap.gss; auto.
-                  unfold Val.offset_ptr; destruct (rs0 PC); auto.
-              }
-              clear - Hstorek Hrange_perm.
-              unfold Mem.range_perm in *.
-              intros ofs Hofs.
-              specialize (Hrange_perm _ Hofs).
-              eapply Mem.perm_store_1; eauto.
-          - (**r jit_state_memory_layout *)
-            unfold jit_state_memory_layout in *.
-            destruct arm_inv_st as (arm_inv_st0 & arm_inv_st1).
-            split.
-            {
-              rewrite <- arm_inv_st0.
-              simpl.
-              erewrite Mem.load_store_other; eauto.
-              left.
-              clear - Hneq1; unfold block_neq in Hneq1; intuition.
-            }
-
-            unfold regs_layout in *.
-            intros r0.
-            specialize (arm_inv_st1 r0).
-            destruct arm_inv_st1 as (vi & Hreg & Hstore0 & Hstore1 & Hreg_eq).
-
-            TODO ...
-
-            exists vi.
-            split.
-            + rewrite <- Hreg.
-              symmetry.
-              eapply upd_jitted_list_unchange_eval_jit_reg_2
-                with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-              (**r jit_regs st0 = Vptr regs_blk Ptrofs.zero *)
-              clear - Hneq1; unfold block_neq in Hneq1.
-              intuition.
-            + split.
-              {
-                rewrite <- Hstore0.
-                erewrite Mem.load_store_other; eauto.
-                right. ... TODO ...
-                clear - Hneq1; unfold block_neq in Hneq1; intuition.
-              }
-
-              split; [assumption | ].
-              split; [assumption | ].
-
-              intros vj Heval_reg0.
-              apply Hreg_eq.
-              rewrite <- Heval_reg0.
-              eapply upd_jitted_list_unchange_eval_jit_reg_2
-                with (jit_blk := jit_blk) (regs_blk := regs_blk); eauto.
-              clear - Hneq1; unfold block_neq in Hneq1.
-              intuition. (*
-          - (**r Mem.unchanged_on *)
-            apply Mem.unchanged_on_refl. *)
+        assert (Heq: match_state_arm rbpf_st rs_init rsk mk nl1 ls st_blk jit_blk sp_blk ra_blk
+         (Z.of_nat (2 * jitted_len stk)) old_sp). {
+          constructor; try assumption; try (split; assumption).
+          eapply Hra_blkk; eauto.
         }
-        specialize (IHl0 Heq); clear Heq.
+        specialize (IHl0 Heq Hrsk_12); clear Heq.
 
-        assert (Heq: sub_mem_blk (jit_mem st1) (jit_mem st_final) jit_blk
-         (Z.of_nat (2 * jitted_len st1))). {
-          simpl.
-          rewrite <- Hofs1.
-          assumption.
-        }
-        specialize (IHl0 Heq); clear Heq.
+        destruct IHl0 as (rs1 & m1 & Hstore1 & Hrs1_12 & Hstack_unchanged1 & Hstar1 & Harm1).
+        destruct Harm1 as (Hra_blk1, Harm_reg_syn1, Harm_reg_same1, Harm_stack_syn1, (Hsp_blk1 & Harm_old_sp1),
+                Harm_pc1, Harm_valid_blk1, (Hst_blk_perm1 & Hsp_blk_perm1), Harm_reg_valid1).
 
-        assert (Heq: match_registers_syn rbpf_st0 m0 (complementary_reg_list nl1 L) regs_blk). { ../..
-          simpl.
-          rewrite <- Hofs1.
-          assumption.
-        }
-        specialize (IHl0 Heq); clear Heq.
-
-        
-
-        assert (Heq: match_state_jit rbpf_st stk). {
-          eapply jit_alu32_thumb_upd_store_unchange_match_state_jit; eauto.
-        }
-        specialize (IHl0 Heq); clear Heq.
-
-        rewrite Hofs1 in Hsub_mem.
-        specialize (IHl0 Hsub_mem).
-
-        remember (Z.of_nat (jitted_len stk + (jitted_len stk + 0))) as ofsk.
-        rename Heqofsk into Hofsk.
-
-        set (onel := [a]).
-        assert (Heq: match_state_arm rbpf_st rsk m0 old_rs onel l2 jit_blk ofsk st_final) by auto.
-        clear Hmatch_statek; rename Heq into Hmatch_statek.
-        assert (Heq0: onel = [a]) by auto.
-
-        assert (Heq: match_state_arm rbpf_st rsk m0 old_rs [] l2 jit_blk (Z.of_nat (2 * jitted_len stk))
-         st_final). {
-          simpl.
-          rewrite <- Hofsk.
-
-          clear - Hnodup_store Hofs0 Hofs1 Harm Hreg_val Hstorek Hofsk Hmatch_statek.
-
-          set (el := []).
-          assert (Heq: match_state_arm rbpf_st rs0 m0 old_rs el l2 jit_blk ofs0 st_final) by auto.
-          clear Harm; rename Heq into Harm.
-          assert (Heq1: el = []) by auto.
-
-          destruct Harm.
-          subst lsr.
-          rename arm_mem into m0.
-
-
-          destruct Hmatch_statek.
-
-          rename arm_blk into jit_blk.
-          rename lsr_stack into l2.
-          rename rs0 into rsk.
-          rename rs into rs0.
-          rename arm_mem into m0.
-          rename ofs0 into ofsk.
-          rename ofs into ofs0.
-
-          constructor; try assumption.
-          - unfold regs_agree; simpl.
-            intros r HF.
-            inversion HF.
-        }
-        specialize (IHl0 Heq); clear Heq.
-
-        destruct IHl0 as (rs1 & Hstore1 & Hinv1 & Hstar1 & Hmatch_state_1).
-
-
-        unfold jit_alu32_thumb_upd_store in Hupd_store.
-        unfold jit_alu32_thumb_load_store_template_jit in Hupd_store.
-        apply upd_jitted_list_jittted_len_2 in Hupd_store as Hlen_eq.
-
-        assert (Hcond: (2 * jitted_len st0 <= 1000)%nat). {
-          simpl.
-          unfold upd_jitted_list, upd_jitted_list' in Hupd_store.
-          destruct (2 * jitted_len st0 + 4 <=? JITTED_LIST_MAX_LENGTH)%nat eqn: Hcond1; [| inversion Hupd_store].
-          clear Hupd_store.
-          unfold JITTED_LIST_MAX_LENGTH in Hcond1.
-          rewrite Nat.leb_le in Hcond1.
-          lia.
-        }
-
-        assert (Hcond2: ( (2 * (jitted_len st0)) + 4 <= 1000)%nat). {
-          simpl.
-          unfold upd_jitted_list, upd_jitted_list' in Hupd_store.
-          destruct (2 * jitted_len st0 + 4 <=? JITTED_LIST_MAX_LENGTH)%nat eqn: Hcond1; [| inversion Hupd_store].
-          clear Hupd_store.
-          unfold JITTED_LIST_MAX_LENGTH in Hcond1.
-          rewrite Nat.leb_le in Hcond1.
-          lia.
-        }
-
-        assert (Hlen_eq0: Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) = 
-            (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))). {
-          rewrite Ptrofs.unsigned_repr.
-          reflexivity.
-          change Ptrofs.max_unsigned with 4294967295; lia.
-        }
-
-        exists rs1.
+        exists rs1, m1.
         split.
         { (**r arm_registers_store *)
           unfold arm_registers_store in *.
           simpl.
-          rewrite Hreg_val.
+          unfold arm_registers_store_one.
+          rewrite Hrs0_12 in *.
           simpl.
-          destruct arm_registers_load_aux eqn: Hload_aux; [| inversion Hload1].
-          subst r.
-          rewrite Int64.int_unsigned_repr.
-          rewrite Int.repr_unsigned.
-          unfold arm_registers_load_one.
-          rewrite Hloadk.
-          rewrite Hload_aux.
-          reflexivity.
+          rewrite Ptrofs.add_zero_l.
+          unfold Ptrofs.of_intu, Ptrofs.of_int.
+          rewrite Int.unsigned_repr.
+          2:{ unfold id_of_reg.
+            change Int.max_unsigned with 4294967295; destruct a; simpl; lia.
+          }
+          rewrite Ptrofs.unsigned_repr.
+          2:{ unfold id_of_reg.
+            change Ptrofs.max_unsigned with 4294967295; destruct a; simpl; lia.
+          }
+          rewrite Hstorek.
+          rewrite <- Hrsk_eq.
+          assumption.
         }
 
-        split.
-        { (**r arm_memory_inv0 *)
-          destruct Hinv1.
-          destruct Hinvk.
-          destruct arm_inv_stk as (Hrsk_r13 & arm_inv_stk).
-          destruct arm_inv_stk0 as (Hrs0_r13 & arm_inv_stk0).
-          destruct arm_inv_reg as (arm_inv_reg_rsk & arm_inv_reg_rs1 & Hrange_perm).
-          destruct arm_inv_reg0 as (arm_inv_reg_rs0 & _).
-          constructor; try assumption.
-          - (**r rs IR13 *)
-            split.
-            + rewrite <- Hrsk_r13.
-              assumption.
-            + assumption.
-          - (**r arm_assume_register_map *)
-            split; [assumption | ].
-            split; assumption.
-        }
-
+        split; [(**r rs1 IR12 *) assumption | ].
+        split; [(**r stack_unchanged *) assumption | ].
         split.
         { (**r star BinSem.step *)
-          eapply star_trans with (s2 := State rsk m0) (t1 := E0); eauto.
+          eapply star_trans with (s2 := State rsk mk) (t1 := E0); eauto.
         }
 
         (**r match_state_arm *)
-        simpl in Hmatch_state_1.
-        rewrite <- Hofs1 in Hmatch_state_1.
-
-        destruct Hinv1.
-        destruct Hinvk.
-        destruct Harm_inv.
-        clear Hst.
-        destruct Hmatch_state_1.
-        destruct Hmatch_statek.
-        rename rs1 into rsk.
-        rename rs into rs1.
-        rename lsr into l1.
-        rename lsr_stack into l2.
-        rename arm_blk into jit_blk.
-        rename ofs1 into ofsk.
-        rename ofs into ofs1.
-        rename jit_st_final into st_final.
-
-        subst lsr0.
-
-        constructor; try assumption.
-
-        (**r regs_agree *)
-        unfold regs_agree in *.
-        intros r Hin.
-        destruct Hin as [Hr | Hin].
-        * subst a.
-          assert (Heq: In r [r]) by (simpl; left; reflexivity).
-          specialize (Hreg_agree0 r Heq); clear Heq.
-          eapply arm_registers_load_unchange_nodup_register with (r := r) in Hload1; eauto.
-          2:{
-            apply NoDup_cons_iff in Hnodup_load.
-            clear - Hnodup_load.
-            intuition.
-          }
-          rewrite <- Hload1.
-          assumption.
-        * apply Hreg_agree; auto.
-    - (**r sub_mem_blk *)
-      unfold sub_mem_blk in *.
-      intros chunk ofs Hrange.
-      rewrite <- Hsub_mem.
-      2:{
+        constructor; try assumption; try (split; assumption).
+        rewrite Harm_pc1.
+        f_equal.
         rewrite Hofs1.
+        simpl; f_equal.
 
-        assert (Heq: (jitted_len stk <= jitted_len st1)%nat). {
-          eapply jit_alu32_thumb_load_jitted_len_leb; eauto.
+      - (**r ~ In a nl1 *)
+        clear - Hnodup_store.
+        rewrite NoDup_cons_iff in *.
+        intuition.
+      - (**r NoDup nl1 *)
+        clear - Hnodup_store.
+        rewrite NoDup_cons_iff in *.
+        intuition.
+      - (**r sub_mem_blk *)
+        unfold sub_mem_blk in *.
+        intros chunk ofs Hrange.
+        rewrite <- Hsub_mem.
+        2:{
+          rewrite Hofs1.
+
+          assert (Heq: (jitted_len stk <= jitted_len st1)%nat). {
+            eapply jit_alu32_thumb_store_jitted_len_leb; eauto.
+          }
+          lia.
         }
+
+        unfold jit_alu32_thumb_upd_store, jit_alu32_thumb_load_store_template_jit in Hupd_store.
+        eapply jit_alu32_thumb_store_load_same; eauto.
+        + eapply upd_jitted_list_unchange_jittted_list_2 in Hupd_store; eauto.
+          rewrite <- Hupd_store; assumption.
+        + eapply upd_jitted_list_jittted_len_2 in Hupd_store; eauto.
+          lia.
+      - (**r match_state_arm *)
+        constructor; try assumption; try (split; assumption).
+    Qed.
+  End JITStore.
+
+  Section JITReloading.
+
+    Definition arm_registers_reloading_one (r: ireg) (rs0: Asm.regset) (m: mem): option Asm.regset :=
+      match Mem.loadv Mint32 m (Val.offset_ptr (rs0 IR13)
+        (Ptrofs.of_intu (Int.mul (int_of_ireg r) (Int.repr 4)))) with
+      | Some v => Some ((rs0 # r <- v) # PC <- (Val.offset_ptr (rs0 # r <- v PC) wsize))
+      | None => None
+      end.
+
+    Fixpoint arm_registers_reloading_aux (l: list ireg) (rs0: Asm.regset) (m: mem): option Asm.regset :=
+      match l with
+      | [] => Some rs0
+      | hd :: tl =>
+        match arm_registers_reloading_one hd rs0 m with
+        | Some rs => arm_registers_reloading_aux tl rs m
+        | None => None
+        end
+      end.
+
+    Definition arm_registers_reloading (l: list ireg) (rs0 rs1: Asm.regset) (m: mem): Prop :=
+      match arm_registers_reloading_aux l rs0 m with
+      | Some rs => rs = rs1
+      | None => False
+      end.
+
+    Definition callee_save_used_sync (lsr_stack: sync_iregs) (rs0 rs1: Asm.regset): Prop :=
+      forall r, List.In r lsr_stack -> rs0 r =  rs1 r.
+
+
+    Lemma jit_reloading_one_simulation: forall r lu ls rbpf_st st0 st1 rs_init rs0 m0
+      ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
+      (Hupd_load : jit_alu32_thumb_upd_reset r st0 = Some st1)
+
+      (Hlist_not_in: ~ List.In r ls /\ ~ List.In r lu /\ List.In r arm_callee_save_regs)
+      (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
+      (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
+
+      (Hsub_mem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
+
+      (Hcallee_used: callee_save_used_sync lu rs_init rs0)
+
+      (Harm: match_state_arm rbpf_st rs_init rs0 m0 [] (r :: ls) st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
+        exists rs1,
+          arm_registers_reloading_one r rs0 m0 = Some rs1 /\
+          rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          callee_save_used_sync (r :: lu) rs_init rs1 /\
+          star BinSem.step ge (State rs0 m0) E0 (State rs1 m0) /\
+           match_state_arm rbpf_st rs_init rs1 m0 [] ls st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
+    Proof.
+      unfold jit_alu32_thumb_upd_reset, jit_alu32_thumb_load_store_template_jit.
+      unfold arm_registers_reloading_one, rbpf_state_inv.
+      intros.
+      destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
+
+      destruct Harm_stack_syn as (Harm_stack_syn & Hnodup_ls).
+      unfold arm_synch_stack in Harm_stack_syn.
+
+      rewrite Hsp_blk in *.
+      simpl.
+      assert (Heq: In r (r :: ls)) by (left; reflexivity).
+      specialize (Harm_stack_syn _ Heq) as Hload_sp; clear Heq.
+      simpl in Hload_sp.
+      rewrite Ptrofs.add_zero_l in *.
+      rewrite Hreg_mul4_unsigned in *.
+      rewrite Hload_sp.
+      eexists.
+      split; [ (**r rs1 *) reflexivity |].
+
+      split.
+      { (**r rs IR12 = Vptr st_blk Ptrofs.zero *)
+        rewrite Pregmap.gso; [| intros HF; inversion HF].
+        (**r here we need know r is a callee-save register *)
+        clear - Hlist_not_in Hrs0_12.
+        rewrite Pregmap.gso; [assumption |].
+        intros HF; inversion HF.
+        subst r.
+        destruct Hlist_not_in as (_ & _ & Hin).
+        repeat (destruct Hin as [Hin | Hin]; [inversion Hin |]).
+        inversion Hin.
+      }
+
+      split.
+      { (**r callee_save_used_sync *)
+        unfold callee_save_used_sync in *.
+        intros r0 Hin.
+        destruct Hin as [Hr_eq | Hin].
+        - subst r0.
+          rewrite Pregmap.gso; [| intros HF; inversion HF].
+          rewrite Pregmap.gss.
+          f_equal.
+        - rewrite Hcallee_used; auto.
+          rewrite Pregmap.gso; [| intros HF; inversion HF].
+          rewrite Pregmap.gso; [f_equal | intros HF; inversion HF].
+          subst r0.
+          destruct Hlist_not_in as (_ & Hnin & _).
+          apply Hnin; assumption.
+      }
+
+      assert (Hst0_eq: S (S (jitted_len st0)) = jitted_len st1). {
+        eapply upd_jitted_list_jittted_len_2; eauto.
+      }
+
+      assert (Hle: (2 * jitted_len st0 <= JITTED_LIST_MAX_LENGTH)%nat). {
+        destruct upd_jitted_list eqn: Hupd; [| inversion Hupd_load].
+        eapply upd_jitted_list_max in Hupd; eauto.
+        lia.
+      }
+      unfold JITTED_LIST_MAX_LENGTH in Hle.
+
+      assert (Hlen_eq0: Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))). {
+        rewrite Ptrofs.unsigned_repr.
+        reflexivity.
+        change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+
+      assert (Hlen_eq1: Ptrofs.unsigned (Ptrofs.add 
+          (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) (Ptrofs.of_int (Int.repr 2))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2)). {
+        unfold Ptrofs.add.
+        change (Ptrofs.unsigned (Ptrofs.of_int (Int.repr 2))) with 2.
+        rewrite Ptrofs.unsigned_repr.
+        - rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+        - change Ptrofs.max_unsigned with 4294967295.
+          rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+
+      split.
+      { (**r star BinSem.step *)
+        eapply star_one.
+        eapply exec_step_bin with (i := Pldr r IR13 (SOimm (Int.mul (int_of_ireg r) (Int.repr 4)))) (w := true).
+        - (**r find_instr *)
+          rewrite Harm_pc.
+
+          assert (Heq: find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) m0 =
+            find_instr (Vptr jit_blk (Ptrofs.repr ofs0)) (jit_mem st1)). {
+            unfold find_instr.
+            unfold sub_mem_blk in Hsub_mem.
+
+            eapply upd_jitted_list_2_load with (jit_blk := jit_blk) in Hupd_load as Hload; eauto.
+            eapply upd_jitted_list_2_load_2 with (jit_blk := jit_blk) in Hupd_load as Hload2; eauto.
+
+            simpl.
+            rewrite Hofs0; simpl.
+            rewrite <- Hsub_mem.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hst0_eq.
+              rewrite Hlen_eq0.
+              change (size_chunk Mint16unsigned) with 2.
+              lia.
+            }
+
+            unfold Ptrofs.of_int in Hload.
+            rewrite Int.unsigned_repr in Hload.
+            2:{ change Int.max_unsigned with 4294967295; lia. }
+            rewrite Hload.
+            simpl.
+            rewrite <- Hsub_mem.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hst0_eq.
+              rewrite Hlen_eq1.
+              change (size_chunk Mint16unsigned) with 2.
+              lia.
+            }
+            unfold Ptrofs.of_int in Hload2.
+            rewrite Int.unsigned_repr in Hload2.
+            2:{ change Int.max_unsigned with 4294967295; lia. }
+            unfold Ptrofs.of_int.
+            change (Int.unsigned (Int.repr 2)) with 2.
+            rewrite Hload2.
+            simpl.
+            reflexivity.
+          }
+          rewrite Heq.
+          eapply lemma_thumb_ldr; eauto.
+
+          change (Int.unsigned (Int.repr 4)) with 4.
+          unfold int_of_ireg.
+          rewrite Int.unsigned_repr;
+            [| change Int.max_unsigned with 4294967295];
+            unfold Z_of_ireg; destruct r; simpl; lia.
+        - (**r exec_instr *)
+          simpl.
+          rewrite Hsp_blk; simpl.
+          rewrite Ptrofs.add_zero_l.
+          unfold exec_load; simpl.
+          rewrite Hreg_mul4_unsigned.
+          rewrite Hload_sp.
+          f_equal.
+      }
+
+      (**r match_state_arm *)
+      constructor; try assumption; try (split; assumption).
+      - (**r ra_blk *)
+        rewrite Pregmap.gso; [| intros HF; inversion HF].
+        rewrite Pregmap.gso; [| intros HF; inversion HF].
+        assumption.
+
+        subst r.
+        clear - Hlist_not_in.
+        destruct Hlist_not_in as (_ & _ & Hin).
+        repeat (destruct Hin as [Hin | Hin]; [inversion Hin |]).
+        inversion Hin.
+      - (**r regs_agree *)
+        unfold regs_agree in *.
+        destruct Harm_reg_syn as (Harm_reg_syn & Hnodupl).
+        split; [| assumption].
+        intros ro Hin.
+        inversion Hin.
+      - (**r arm_synch_stack *)
+        unfold arm_synch_stack.
+        split.
+        + intros r0 Hin.
+          assert (Heq: In r0 (r :: ls)) by (right; assumption).
+          specialize (Harm_stack_syn _ Heq); clear Heq.
+          rewrite Pregmap.gso; [| intros HF; inversion HF].
+          rewrite Pregmap.gso; [| intros HF; inversion HF].
+          rewrite Hsp_blk; simpl.
+          simpl in Harm_stack_syn.
+          rewrite Ptrofs.add_zero_l in *.
+          rewrite Hreg_mul4_unsigned in *.
+          assumption.
+
+          subst r.
+          clear - Hlist_not_in.
+          destruct Hlist_not_in as (_ & _ & Hin).
+          repeat (destruct Hin as [Hin | Hin]; [inversion Hin |]).
+          inversion Hin.
+
+        + (**r NoDup ls *)
+          rewrite NoDup_cons_iff in Hnodup_ls.
+          destruct Hnodup_ls as (_ & Hnodup_ls).
+          assumption.
+
+      - (**r rs IR13 *)
+        rewrite Pregmap.gso; [| intros HF; inversion HF].
+        rewrite Pregmap.gso; [| intros HF; inversion HF].
+        split; [assumption |].
+        rewrite Hsp_blk; assumption.
+
+        subst r.
+        clear - Hlist_not_in.
+        destruct Hlist_not_in as (_ & _ & Hin).
+        repeat (destruct Hin as [Hin | Hin]; [inversion Hin |]).
+        inversion Hin.
+
+      - (**r rs PC *)
+        rewrite Pregmap.gss.
+        rewrite Pregmap.gso; [| intros HF; inversion HF].
+        rewrite Harm_pc.
+        unfold Val.offset_ptr, wsize; simpl.
+        f_equal.
+        eapply add_ofs_4; eauto.
+    Qed.
+
+    Lemma arm_registers_reloading_nodup:
+      forall l rs0 rs1 m r
+        (Hreloading : arm_registers_reloading l rs0 rs1 m)
+        (Hnodup : NoDup (r :: l)),
+          rs0 r = rs1 r.
+    Proof.
+      unfold arm_registers_reloading; induction l; simpl; intros.
+      - subst rs0; f_equal.
+      - unfold arm_registers_reloading_one in Hreloading.
+        destruct Mem.loadv eqn: Hone; [| inversion Hreloading].
+        specialize (IHl _ _ _ r Hreloading).
+        rewrite <- IHl.
+        + rewrite Pregmap.gso; [| intros HF; inversion HF].
+          rewrite Pregmap.gso; [f_equal | intros HF; inversion HF].
+          rewrite NoDup_cons_iff in *.
+          destruct Hnodup as (Hnin & Hnodup).
+          apply Hnin.
+          left.
+          auto.
+        + rewrite NoDup_cons_iff in *.
+          destruct Hnodup as (Hnin & Hnodup).
+          rewrite NoDup_cons_iff in *.
+          destruct Hnodup as (Hnin1 & Hnodup).
+          split.
+          * intro HF; apply Hnin.
+            right; assumption.
+          * assumption.
+    Qed.
+
+    Lemma jit_reloading_simulation: forall ls rbpf_st st0 st1 rs_init rs0 m0
+      ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
+      (Hupd_load : jit_alu32_thumb_reset ls st0 = Some st1)
+
+      (Hnodup: NoDup ls)
+      (Harm_callee_save: forall r, List.In r ls -> List.In r arm_callee_save_regs)
+      (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
+      (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
+
+      (Hsub_mem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+      (Hjit_inv: rbpf_state_inv st0 jit_blk)
+(*
+      (Hsubset: list_subset lt ls) *)
+      (Hcallee_used: callee_save_used_sync [] rs_init rs0)
+
+      (Harm: match_state_arm rbpf_st rs_init rs0 m0 [] ls st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+      (Hrs0_12: (rs0 IR12) = (Vptr st_blk Ptrofs.zero)),
+        exists rs1,
+          arm_registers_reloading ls rs0 rs1 m0 /\
+          rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+          callee_save_used_sync ls rs_init rs1 /\
+          star BinSem.step ge (State rs0 m0) E0 (State rs1 m0) /\
+           match_state_arm rbpf_st rs_init rs1 m0 [] [] st_blk jit_blk sp_blk ra_blk ofs1 old_sp.
+    Proof.
+      induction ls; intros.
+      { (**r l = [] *)
+        simpl in *.
+        injection Hupd_load as Hst_eq.
+        subst st0.
+        exists rs0.
+        split.
+        { unfold arm_registers_reloading.
+          simpl.
+          reflexivity.
+        }
+        split; [assumption | ].
+        split; [assumption | ].
+        split; [ apply star_refl | ].
+        rewrite <- Hofs0 in Hofs1.
+        subst ofs1.
+        assumption.
+      }
+
+      simpl in Hupd_load.
+      destruct jit_alu32_thumb_upd_reset eqn: Hone_reload; [| inversion Hupd_load].
+      rename j into stk.
+
+      assert (Hle: (2 * jitted_len st0 <= JITTED_LIST_MAX_LENGTH)%nat). {
+        clear - Hone_reload.
+        unfold jit_alu32_thumb_upd_reset, jit_alu32_thumb_load_store_template_jit in Hone_reload.
+        destruct upd_jitted_list eqn: Hupd; [| inversion Hone_reload].
+        eapply upd_jitted_list_max in Hupd; eauto.
+        lia.
+      }
+      unfold JITTED_LIST_MAX_LENGTH in Hle.
+
+      eapply jit_reloading_one_simulation with (r := a) (lu := []) (ls := ls)
+        (rbpf_st := rbpf_st) (rs_init := rs_init) (rs0 := rs0) (m0 := m0)
+        (old_sp := old_sp) (sp_blk := sp_blk)
+        (ofs0 := ofs0) (ofs1 := Z.of_nat (2 * jitted_len stk))
+        in Hone_reload as Hone; eauto.
+
+      - (**r Main *)
+        destruct Hone as (rsk & Honek & Hrsk_12 & Hcalleek & Hstark & Harmk).
+        specialize (IHls rbpf_st stk st1 rs_init rsk m0 (Z.of_nat (2 * jitted_len stk)) ofs1 st_blk jit_blk sp_blk ra_blk old_sp).
+        specialize (IHls Hupd_load).
+
+        assert (Heq: NoDup ls). {
+          rewrite NoDup_cons_iff in Hnodup.
+          destruct Hnodup as (_ & Hnodup).
+          assumption.
+        }
+        specialize (IHls Heq); clear Heq.
+
+        assert (Heq: forall r : ireg, In r ls -> In r arm_callee_save_regs). {
+          intros r Hin.
+          eapply Harm_callee_save; eauto.
+          right; assumption.
+        }
+        specialize (IHls Heq); clear Heq.
+
+        assert (Heq: Z.of_nat (2 * jitted_len stk) = Z.of_nat (2 * jitted_len stk)) by f_equal.
+        specialize (IHls Heq Hofs1); clear Heq.
+
+        assert (Heq: sub_mem_blk (jit_mem st1) m0 jit_blk (Z.of_nat (2 * jitted_len stk)) ofs1). {
+          unfold sub_mem_blk in *.
+          intros chunk ofs Hofs.
+          erewrite Hsub_mem; eauto.
+          split; [| lia].
+          unfold jit_alu32_thumb_upd_reset, jit_alu32_thumb_load_store_template_jit in Hone_reload.
+          eapply upd_jitted_list_jittted_len_2 in Hone_reload; eauto.
+          lia.
+        }
+        specialize (IHls Heq); clear Heq.
+
+        assert (Heq: rbpf_state_inv stk jit_blk). {
+          unfold rbpf_state_inv in *.
+          unfold jit_alu32_thumb_upd_reset, jit_alu32_thumb_load_store_template_jit in Hone_reload.
+          eapply upd_jitted_list_unchange_jittted_list_2 in Hone_reload; eauto.
+          rewrite <- Hone_reload.
+          assumption.
+        }
+        specialize (IHls Heq); clear Heq.
+
+        assert (Heq: callee_save_used_sync [] rs_init rsk). {
+          unfold callee_save_used_sync.
+          intros r HF; inversion HF.
+        }
+        specialize (IHls Heq); clear Heq.
+
+        destruct Harmk as (Hra_blkk, Harm_reg_synk, Harm_reg_samek, Harm_stack_synk, (Hsp_blkk & Harm_old_spk),
+              Harm_pck, Harm_valid_blkk, (Hst_blk_permk & Hsp_blk_permk), Harm_reg_validk).
+
+        assert (Heq: match_state_arm rbpf_st rs_init rsk m0 [] ls st_blk jit_blk sp_blk ra_blk
+         (Z.of_nat (2 * jitted_len stk)) old_sp). {
+          constructor; try assumption; try (split; assumption).
+        }
+        specialize (IHls Heq Hrsk_12); clear Heq.
+
+        destruct IHls as (rs1 & Hreloading1 & Hrs1_12 & Hcallee1 & Hstar1 & Harm1).
+
+        destruct Harm1 as (Hra_blk1, Harm_reg_syn1, Harm_reg_same1, Harm_stack_syn1, (Hsp_blk1 & Harm_old_sp1),
+              Harm_pc1, Harm_valid_blk1, (Hst_blk_perm1 & Hsp_blk_perm1), Harm_reg_valid1).
+
+        exists rs1.
+        split.
+        { (**r arm_registers_reloading *)
+          unfold arm_registers_reloading in *.
+          simpl.
+          rewrite Honek.
+          assumption.
+        }
+
+        split; [(**r rs1 IR12*) assumption | ].
+        split.
+        { (**r callee_save_used_sync *)
+          clear - Hreloading1 Hcallee1 Hcalleek Hnodup.
+          unfold callee_save_used_sync in *; simpl.
+          intros r Hin.
+          destruct Hin as [Hr_eq | Hin].
+          - subst a.
+            rewrite Hcalleek; auto; [| left; reflexivity].
+            clear - Hreloading1 Hnodup.
+            eapply arm_registers_reloading_nodup; eauto.
+          - eapply Hcallee1; eauto.
+        }
+
+        split; [ (**r star BinSem.step *) eapply star_trans; eauto | ].
+
+        (**r match_state_arm *)
+        constructor; try assumption; try (split; assumption).
+
+      - (**r arm_callee_save_regs *)
+        split.
+        + rewrite NoDup_cons_iff in Hnodup.
+          destruct Hnodup as (Hnodup & _).
+          assumption.
+        + split.
+          * intro HF; inversion HF.
+          * eapply Harm_callee_save; eauto.
+            left; reflexivity.
+      - (**r sub_mem_blk *)
+        unfold sub_mem_blk in Hsub_mem.
+        unfold sub_mem_blk.
+        intros chunk ofs2 Hrange.
+        specialize (Hsub_mem chunk ofs2).
+        assert (Heq: ofs0 <= ofs2 /\ ofs2 + size_chunk chunk <= ofs1). {
+          assert (Heq: (jitted_len stk <= jitted_len st1)%nat). {
+            eapply jit_alu32_thumb_reset_jitted_len_leb; eauto.
+          }
+          lia.
+        }
+        specialize (Hsub_mem Heq); clear Heq.
+
+        rewrite <- Hsub_mem.
+
+        eapply jit_alu32_thumb_reset_load_same; eauto.
+        unfold jit_alu32_thumb_upd_reset, jit_alu32_thumb_load_store_template_jit in Hone_reload.
+        eapply upd_jitted_list_unchange_jittted_list_2 in Hone_reload; eauto.
+        rewrite <- Hone_reload; assumption.
+        lia.
+    Qed.
+  End JITReloading.
+
+  Section JITPost.
+
+
+    Section MatchStateJITARMWeak. (**r removing all old_sp info *)
+
+    Record match_state_arm_weak (st: state) (old_rs rs: Asm.regset) (m: mem)
+      (lr: sync_regs) (ls: sync_iregs)
+      (st_blk jit_blk sp_blk: block) (ofs: Z): Prop := {
+      arm_reg_syn_weak:    regs_agree lr st rs /\ NoDup lr; (*
+      arm_stack_syn_weak:  arm_synch_stack ls old_rs rs m old_sp /\ NoDup ls;
+      arm_old_sp:     rs IR13 = Vptr sp_blk Ptrofs.zero /\ Mem.loadv Mint32 m (rs IR13) = Some old_sp;
+      arm_pc_weak:         rs PC = Vptr jit_blk (Ptrofs.repr ofs); *)
+      arm_valid_blk_weak:  (st_blk <> jit_blk (*/\ st_blk <> sp_blk /\ jit_blk <> sp_blk *)) /\
+                      Mem.valid_block m jit_blk /\ Mem.valid_block m st_blk (*/\ Mem.valid_block m sp_blk *);
+      arm_blk_perm_weak:   Mem.range_perm m st_blk 0 96 Cur Writable; (* /\
+                      Mem.range_perm m sp_blk 0 48 Cur Writable; *)
+      arm_reg_valid_weak:  forall (arm_rs: Asm.regset) r, (exists vi, arm_rs r = Vint vi) \/ (exists b o, arm_rs r = Vptr b o)
+    }.
+  End MatchStateJITARMWeak.
+
+    Definition arm_registers_post (rs0 rs1: Asm.regset) (m: mem): Prop :=
+      match Mem.loadv Mint32 m (rs0 IR13) with
+      | Some v =>  rs1 = (nextinstr true rs0 # IR13 <- v) # PC <- ((nextinstr_nf true rs0 # IR13 <- v) IR14)
+      | _ => False
+      end.
+
+    Lemma jit_post_simulation: forall rbpf_st st0 st1 rs0 m0 ofs0 ofs1 st_blk jit_blk sp_blk ra_blk old_sp
+    (Hjit_post: jit_alu32_post st0 = Some st1)
+    (Hofs0: ofs0 = (Z.of_nat (2 * (jitted_len st0))))
+    (Hofs1: ofs1 = (Z.of_nat (2 * (jitted_len st1))))
+    (Hmem: sub_mem_blk (jit_mem st1) m0 jit_blk ofs0 ofs1)
+    (Hjit_inv: rbpf_state_inv st0 jit_blk)
+    (Harm: match_state_arm rbpf_st rs0 rs0 m0 [] [] st_blk jit_blk sp_blk ra_blk ofs0 old_sp)
+    (Hrs_1: rs0 IR12 = Vptr st_blk Ptrofs.zero),
+      exists rs1,
+        arm_registers_post rs0 rs1 m0 /\
+        rs1 IR12 = Vptr st_blk Ptrofs.zero /\
+        rs1 PC = rs1 IR14 (**r RA *) /\
+        rs1 IR13 = old_sp /\
+        star BinSem.step ge (State rs0 m0) E0 (State rs1 m0) /\
+        match_state_arm_weak rbpf_st rs0 rs1 m0 [] [] st_blk jit_blk sp_blk ofs1. (**r is_final_state should do `Pfreeframe` *)
+    Proof.
+      intros.
+      unfold arm_registers_post.
+
+      destruct Harm as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, Harm_old_sp,
+        Harm_pc, Harm_valid_blk, Harm_blk_perm, arm_reg_valid).
+      destruct Harm_old_sp as (Hsp_blk & Harm_old_sp).
+      rewrite Harm_old_sp.
+      eexists.
+      split; [(**r arm_registers_pre *) reflexivity | ].
+
+      split.
+      { (**r rs1 IR12 = Vptr st_blk Ptrofs.zero *)
+        unfold nextinstr_nf, nextinstr, undef_flags.
+        repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]).
+        assumption.
+      }
+
+      split.
+      { (**r rs1 PC = rs1 IR14 *)
+        unfold nextinstr_nf, nextinstr, undef_flags.
+        rewrite Pregmap.gss.
+        repeat (rewrite Pregmap.gso; [ | intros HF; inversion HF]).
+        f_equal.
+      }
+
+      split.
+      { (**r rs1 IR13 = old_sp *)
+        unfold nextinstr_nf, nextinstr, undef_flags.
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        rewrite Pregmap.gso; [ | intros HF; inversion HF].
+        rewrite Pregmap.gss.
+        reflexivity.
+      }
+
+      unfold jit_alu32_post, jit_alu32_thumb_load_store_template_jit in Hjit_post.
+
+      destruct upd_jitted_list eqn: Hldr1; [| inversion Hjit_post].
+      rename j into stk.
+
+      destruct upd_jitted_list eqn: Hldr2 in Hjit_post; [| inversion Hjit_post].
+      rename j into stn.
+      apply upd_jitted_list_jittted_len in Hldr1 as Hlen_eq1.
+      apply upd_jitted_list_jittted_len in Hldr2 as Hlen_eq2.
+      apply upd_jitted_list_jittted_len in Hjit_post as Hlen_eq3.
+
+
+      assert (Hcond: (2 * jitted_len st0 <= 1000)%nat). {
+        simpl.
+        apply upd_jitted_list_max in Hldr1.
+        unfold JITTED_LIST_MAX_LENGTH in Hldr1.
         lia.
       }
 
-      eapply jit_alu32_thumb_load_load_same; eauto.
-      unfold jit_alu32_thumb_upd_save, jit_alu32_thumb_load_store_template_jit in Hupd_load.
-      eapply upd_jitted_list_unchange_jittted_list_2 in Hupd_load; eauto.
-      rewrite <- Hupd_load; assumption.
-    - rewrite <- Hreg_val.
-      symmetry.
-      clear - Hst.
-      destruct Hst.
-      clear - mregs0.
-      unfold match_registers in mregs0.
-      destruct mregs0 as (_ & _ & Hreg).
-      specialize (Hreg a).
-      destruct Hreg as (vi & Hreg0 & Hreg1 & _).
-      rewrite Hreg0, Hreg1.
-      f_equal.
-    Admitted.
-*)
-  End JITStore.
+      assert (Hlen_eq0: Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))). {
+        rewrite Ptrofs.unsigned_repr.
+        reflexivity.
+        change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+
+      assert (Hlen_eq4: Ptrofs.unsigned (Ptrofs.add 
+          (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) (Ptrofs.of_int (Int.repr 2))) = 
+          (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)) + 2)). {
+        unfold Ptrofs.add.
+        change (Ptrofs.unsigned (Ptrofs.of_int (Int.repr 2))) with 2.
+        rewrite Ptrofs.unsigned_repr.
+        - rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+        - change Ptrofs.max_unsigned with 4294967295.
+          rewrite Ptrofs.unsigned_repr; [lia |].
+          change Ptrofs.max_unsigned with 4294967295; lia.
+      }
+
+      split.
+      { (**r star BinSem.step *)
+        eapply star_two; eauto.
+        - eapply exec_step_bin with (i := Pldr IR13 IR13 (SOimm Int.zero)) (w := true); eauto.
+          + (**r find_instr *)
+            rewrite Harm_pc.
+
+            unfold Int.zero in *.
+
+            erewrite <- lemma_thumb_ldr with (st1 := stn); eauto.
+
+            2:{ lia. }
+            2:{ rewrite Hldr1.
+              rewrite Hldr2.
+              f_equal.
+            }
+
+            unfold find_instr.
+            rewrite Hofs0; simpl.
+            unfold sub_mem_blk in Hmem.
+            rewrite <- Hmem.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hlen_eq3.
+              rewrite <- Hlen_eq2.
+              rewrite Hlen_eq0.
+              change (size_chunk Mint16unsigned) with 2.
+              lia.
+            }
+
+            rewrite <- Hmem.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hlen_eq3.
+              rewrite <- Hlen_eq2.
+              rewrite Hlen_eq4.
+              change (size_chunk Mint16unsigned) with 2.
+              lia.
+            }
+
+            unfold rbpf_state_inv in *.
+            assert (Heq1: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
+              eapply upd_jitted_list_unchange_jittted_list in Hldr1; eauto.
+              rewrite <- Hldr1; assumption.
+            }
+
+            assert (Heq2: jitted_list stn = Vptr jit_blk Ptrofs.zero). {
+              eapply upd_jitted_list_unchange_jittted_list in Hldr2; eauto.
+              rewrite <- Hldr2; assumption.
+            }
+
+            assert (Heq3: jitted_list st1 = Vptr jit_blk Ptrofs.zero). {
+              eapply upd_jitted_list_unchange_jittted_list in Hjit_post; eauto.
+              rewrite <- Hjit_post; assumption.
+            }
+
+            assert (Heq: Mem.load Mint16unsigned (jit_mem stn) jit_blk
+                (Ptrofs.unsigned
+                   (Ptrofs.repr
+                      (Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0))))))) = 
+            Mem.load Mint16unsigned (jit_mem st1) jit_blk
+              (Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))))). {
+              unfold upd_jitted_list, upd_jitted_list' in Hjit_post.
+              destruct (2 * jitted_len _ + 4 <=? JITTED_LIST_MAX_LENGTH)%nat; [| inversion Hjit_post].
+              rewrite Heq2 in Hjit_post.
+              simpl in Hjit_post.
+              rewrite Ptrofs.add_zero_l in Hjit_post.
+              destruct Mem.store eqn: Hstore; [| inversion Hjit_post].
+              assert (Heq: (jit_mem st1) = m). {
+                injection Hjit_post as Heq.
+                rewrite <- Heq.
+                auto.
+              }
+              rewrite Heq.
+              symmetry.
+              erewrite Mem.load_store_other; eauto.
+              rewrite Ptrofs.repr_unsigned.
+              f_equal.
+              right.
+              rewrite <- Hlen_eq2.
+              rewrite <- Hlen_eq1.
+              change (size_chunk Mint16unsigned) with 2.
+              simpl in Hcond.
+              rewrite Ptrofs.unsigned_repr.
+              2:{ change Ptrofs.max_unsigned with 4294967295; lia. }
+              unfold Ptrofs.of_int.
+              rewrite Ptrofs.unsigned_repr.
+              2:{ rewrite Int.unsigned_repr.
+                change Ptrofs.max_unsigned with 4294967295; lia.
+                change Int.max_unsigned with 4294967295; lia.
+              }
+              rewrite Int.unsigned_repr.
+              2:{ change Int.max_unsigned with 4294967295; lia. }
+              lia.
+            }
+            rewrite Heq; clear Heq.
+
+            assert (Heq: Mem.load Mint16unsigned (jit_mem stn) jit_blk
+             (Ptrofs.unsigned
+                (Ptrofs.add
+                   (Ptrofs.repr
+                      (Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0))))))
+                   (Ptrofs.of_int (Int.repr 2)))) =
+            Mem.load Mint16unsigned (jit_mem st1) jit_blk
+             (Ptrofs.unsigned
+                (Ptrofs.add (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0))))
+                   (Ptrofs.of_int (Int.repr 2))))). {
+              unfold upd_jitted_list, upd_jitted_list' in Hjit_post.
+              destruct (2 * jitted_len _ + 4 <=? JITTED_LIST_MAX_LENGTH)%nat; [| inversion Hjit_post].
+              rewrite Heq2 in Hjit_post.
+              simpl in Hjit_post.
+              rewrite Ptrofs.add_zero_l in Hjit_post.
+              destruct Mem.store eqn: Hstore; [| inversion Hjit_post].
+              assert (Heq: (jit_mem st1) = m). {
+                injection Hjit_post as Heq.
+                rewrite <- Heq.
+                auto.
+              }
+              rewrite Heq.
+              symmetry.
+              erewrite Mem.load_store_other; eauto.
+              rewrite Ptrofs.repr_unsigned.
+              f_equal.
+              right.
+              rewrite <- Hlen_eq2.
+              rewrite <- Hlen_eq1.
+              change (size_chunk Mint16unsigned) with 2.
+              simpl in Hcond.
+              unfold Ptrofs.add, Ptrofs.of_int.
+              change (Ptrofs.unsigned (Ptrofs.repr (Int.unsigned (Int.repr 2)))) with 2.
+              rewrite Ptrofs.unsigned_repr.
+              2:{ change Ptrofs.max_unsigned with 4294967295.
+                rewrite Ptrofs.unsigned_repr. lia.
+                change Ptrofs.max_unsigned with 4294967295; lia.
+              }
+              rewrite Ptrofs.unsigned_repr.
+              2:{ change Ptrofs.max_unsigned with 4294967295; lia. }
+              rewrite Int.unsigned_repr.
+              2:{ change Int.max_unsigned with 4294967295; lia. }
+              rewrite Ptrofs.unsigned_repr.
+              2:{ change Ptrofs.max_unsigned with 4294967295; lia. }
+              lia.
+            }
+            rewrite Heq; clear Heq.
+            reflexivity.
+
+          + (**r exec_instr *)
+            simpl.
+            rewrite Hsp_blk in *.
+            unfold exec_load; simpl.
+            change (Ptrofs.unsigned (Ptrofs.add Ptrofs.zero (Ptrofs.of_int Int.zero))) with 0.
+            simpl in Harm_old_sp.
+            change (Ptrofs.unsigned Ptrofs.zero) with 0 in Harm_old_sp.
+            rewrite Harm_old_sp.
+            f_equal.
+
+        - eapply exec_step_bin with (i := Pbreg IR14) (w := false); eauto.
+          + (**r find_instr *)
+            unfold nextinstr.
+            rewrite Pregmap.gss.
+            rewrite Pregmap.gso; [ | intros HF; inversion HF].
+            rewrite Harm_pc.
+            unfold Val.offset_ptr, wsize.
+
+            unfold find_instr; simpl.
+            unfold sub_mem_blk in Hmem.
+            rewrite <- Hmem.
+            rewrite Hofs0; simpl.
+            2:{
+              rewrite Hofs1, Hofs0.
+              rewrite <- Hlen_eq3.
+              rewrite <- Hlen_eq2.
+              change (size_chunk Mint16unsigned) with 2.
+              unfold Ptrofs.add.
+              change (Ptrofs.unsigned (Ptrofs.repr 4)) with 4.
+              rewrite Ptrofs.unsigned_repr.
+              2:{
+                change Ptrofs.max_unsigned with 4294967295.
+                rewrite Ptrofs.unsigned_repr. lia.
+                change Ptrofs.max_unsigned with 4294967295; lia.
+              }
+              rewrite Ptrofs.unsigned_repr.
+              2:{
+                change Ptrofs.max_unsigned with 4294967295; lia.
+              }
+              lia.
+            }
+
+            assert (Heq: (Ptrofs.unsigned
+              (Ptrofs.add (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0)))) (Ptrofs.repr 4))) = 
+              Ptrofs.unsigned (Ptrofs.repr (Z.of_nat (2 *(jitted_len stn))))). {
+              simpl.
+              rewrite <- Hlen_eq2.
+              rewrite <- Hlen_eq1.
+
+              unfold Ptrofs.add.
+              change (Ptrofs.unsigned (Ptrofs.repr 4)) with 4.
+              rewrite Ptrofs.unsigned_repr.
+              2:{
+                change Ptrofs.max_unsigned with 4294967295.
+                rewrite Ptrofs.unsigned_repr.
+                2:{ change Ptrofs.max_unsigned with 4294967295; lia. }
+                lia.
+              }
+              rewrite Ptrofs.unsigned_repr.
+              2:{ change Ptrofs.max_unsigned with 4294967295; lia. }
+              rewrite Ptrofs.unsigned_repr.
+              2:{ change Ptrofs.max_unsigned with 4294967295; lia. }
+              lia.
+            }
+            rewrite Heq.
+            remember (Ptrofs.add (Ptrofs.repr (Z.of_nat (jitted_len st0 + (jitted_len st0 + 0))))
+                  (Ptrofs.repr 4)) as k.
+            unfold Ptrofs.add.
+            rewrite Heq; subst k.
+            clear Heq.
+
+            eapply lemma_thumb_breg; eauto.
+
+            unfold rbpf_state_inv in *.
+            assert (Heq1: jitted_list stk = Vptr jit_blk Ptrofs.zero). {
+              eapply upd_jitted_list_unchange_jittted_list in Hldr1; eauto.
+              rewrite <- Hldr1; assumption.
+            }
+
+            assert (Heq2: jitted_list stn = Vptr jit_blk Ptrofs.zero). {
+              eapply upd_jitted_list_unchange_jittted_list in Hldr2; eauto.
+              rewrite <- Hldr2; assumption.
+            }
+
+            assumption.
+        - rewrite E0_right; reflexivity.
+      }
+
+      constructor; try assumption.
+      - (**r regs_agree *)
+        destruct Harm_reg_syn as (Harm_reg_syn & Hnodup).
+        split; [| assumption].
+        unfold regs_agree.
+        intros r Hin; inversion Hin.
+
+      - (**r Mem.valid_block *)
+        destruct Harm_valid_blk as (Hneq & Hvalid0 & Hvalid1 & Hvalid2).
+        split; intuition.
+      - (**r Mem.range_perm *)
+        destruct Harm_blk_perm as (Harm_blk_perm & _); assumption.
+    Qed.
+  End JITPost.
+
+  Section JITCorrectness. (*
+    Definition relation_interpreter (rbpf_st: state) (jit_st: jit_state): Prop :=
+      forall r, exists vi,
+        eval_reg r rbpf_st = Some (Val.longofintu (Vint vi)) /\
+        eval_jit_reg r jit_st = Some (Val.longofintu (Vint vi)). *)
+
+    Definition relation_interpreter (m0 m1: mem) (st_blk: block): Prop := (**r m0 = bpf_m rbpf_st /\ m1 = jit_mem jit_st *)
+      forall r : reg, exists vi : int,
+        Mem.load Mint32 m0 st_blk (8 * id_of_reg r + 8) = Some (Vint vi) /\
+        Mem.load Mint32 m1 st_blk (8 * id_of_reg r + 8) = Some (Vint vi).
+
+    Theorem jit_correctness:
+      forall l rbpf_st0 rbpf_st1 jit_st jit_st0 (rs0: Asm.regset) m0 ofs jit_blk st_blk ra_blk ra_ofs old_sp sp_blk
+        (Hjit: jit_alu32_to_thumb l jit_st = Some jit_st0)
+        (Hst: relation_interpreter (bpf_m rbpf_st0) (jit_mem jit_st0) st_blk)
+        (Hinit_state: rs0 IR0 = Vptr jit_blk ofs /\ rs0 PC = Vptr jit_blk ofs /\
+          rs0 IR1 = Vptr st_blk Ptrofs.zero /\ rs0 IR14 = Vptr ra_blk ra_ofs /\
+          rs0 IR13 = Vptr sp_blk Ptrofs.zero /\ Mem.loadv Mint32 m0 (rs0 IR13) = Some old_sp /\
+          (m0, sp_blk) = Mem.alloc (jit_mem jit_st0) 0 48)
+        (Hofs_eq: (Ptrofs.repr (Z.of_nat (2 * jitted_len jit_st))) = ofs) (**r compute by JIT_ALU32 *)
+        (Hinv: (st_blk <> jit_blk /\ st_blk <> sp_blk /\ jit_blk <> sp_blk) /\
+            Mem.valid_block m0 jit_blk /\ Mem.valid_block m0 st_blk /\
+            Mem.range_perm m0 st_blk 0 96 Cur Writable) (**r Mem_INV *)
+        (Hreg_inv: regs_st rbpf_st0 = Vptr st_blk (Ptrofs.repr 8))
+        (Hjit_inv: jitted_list jit_st = Vptr jit_blk Ptrofs.zero) (*
+        (Hverifier_inv: bpf_verifier_for_compcert l = true) (**r an invariant for the unverified rBPF verifier, we will use it when we do div and shift instructions *) *)
+        (Hrbpf_sem: rbpf_sem rbpf_st0 l rbpf_st1),
+          exists rs1 m1,
+            star BinSem.step ge (State rs0 m0) E0 (State rs1 m1) /\
+            relation_interpreter (bpf_m rbpf_st1) m1 st_blk. (**r JIT state shares the memory with ARM *)
+    Proof.
+      unfold relation_interpreter, jit_alu32_to_thumb.
+      intros.
+
+      destruct jit_alu32_load_list eqn: Hload_list; [| inversion Hjit].
+      rename l0 into l_load.
+      destruct jit_alu32_store_list eqn: Hstore_list; [| inversion Hjit].
+      rename l0 into l_store.
+      destruct jit_alu32_pre eqn: Hjit_pre; [| inversion Hjit].
+      rename j into st_pre.
+      destruct jit_alu32_thumb_save eqn: Hjit_save; [| inversion Hjit].
+      rename j into st_save.
+      destruct jit_alu32_thumb_load eqn: Hjit_load; [| inversion Hjit].
+      rename j into st_load.
+      destruct jit_core eqn: Hjit_core; [| inversion Hjit].
+      rename j into st_core.
+      destruct jit_alu32_thumb_store eqn: Hjit_store; [| inversion Hjit].
+      rename j into st_store.
+      destruct jit_alu32_thumb_reset eqn: Hjit_reset; [| inversion Hjit].
+      rename j into st_reset.
+
+      eapply jit_pre_simulation with (rs0 := rs0)(m0 := m0) (rbpf_st := rbpf_st0)
+        (st_blk := st_blk) (jit_blk := jit_blk) (sp_blk := sp_blk) (ra_blk := ra_blk) (old_sp := old_sp)
+        in Hjit_pre as Hone; eauto.
+
+      4:{ destruct Hinit_state as (_ & _ & Hrs_1 & _).
+        assumption.
+      }
+
+      3:{
+        constructor; try assumption; try (split; assumption).
+        - exists ra_ofs.
+          destruct Hinit_state as (_ & _ & _ & Hrs_14 & _).
+          assumption.
+        - split; [| apply NoDup_nil].
+          unfold regs_agree.
+          intros r HF; inversion HF.
+        - unfold regs_unchanged in *.
+          intros r HF.
+          specialize (Hst r).
+          destruct Hst as (vi & Hload1 & Hload2).
+          exists vi.
+          split; [assumption | ].
+          rewrite <- Hload2.
+          destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+          eapply Mem.load_alloc_unchanged; eauto.
+          destruct Hinv as (Hneq & _ & Hvalid & _).
+          symmetry in Hmem.
+          eapply Mem.valid_block_alloc_inv with (b' := st_blk) in Hmem; eauto.
+          destruct Hmem as [Heq | Hmem]; [| assumption].
+          destruct Hneq as (_ & Hneq & _).
+          exfalso; apply Hneq; assumption.
+        - split; [| apply NoDup_nil].
+          unfold arm_synch_stack.
+          intros r HF; inversion HF.
+        - intuition.
+        - destruct Hinit_state as (_ & Hrs_pc & _).
+          rewrite Hrs_pc.
+          f_equal.
+          subst ofs.
+          f_equal.
+        - intuition.
+          rename H12 into Hmem.
+          eapply Mem.valid_new_block; eauto.
+        - split; [intuition | ].
+          destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+          unfold Mem.range_perm.
+          intros ofs0 Hofs0.
+          symmetry in Hmem.
+          eapply Mem.perm_alloc_2 with (k := Cur) in Hmem; eauto.
+          eapply Mem.perm_implies; eauto.
+          constructor.
+      }
+      2:{
+          eapply jit_alu32_jit_blk_memory_layout in Hjit_pre; eauto.
+          destruct Hjit_pre as (Hjit_pre & _).
+          eapply Hjit_pre.
+
+          destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+          eapply Hmem.
+      }
+
+      destruct Hone as (rs1_pre & Hrs_const_pre & Hrs_12_pre & Hstack_unchanged_pre & Hstar_pre & Harm_pre).
+
+      eapply jit_spilling_simulation with (rs0 := rs1_pre)(m0 := m0) (rbpf_st := rbpf_st0)
+        (st_blk := st_blk) (jit_blk := jit_blk) (sp_blk := sp_blk) (ra_blk := ra_blk) (old_sp := old_sp)
+        in Hjit_save as Hone; eauto.
+
+      7:{
+        destruct Harm_pre as (Hra_blk_pre, Harm_reg_syn_pre, Harm_reg_same_pre, Harm_stack_syn_pre, Harm_old_sp_pre,
+        Harm_pc_pre, Harm_valid_blk_pre, Harm_blk_perm_pre, arm_reg_valid_pre).
+        constructor; try assumption; try (split; assumption).
+        split; [| apply NoDup_nil].
+        unfold arm_synch_stack.
+        intros r HF; inversion HF.
+      }
+
+      6:{
+        destruct Harm_pre as (Hra_blk_pre, Harm_reg_syn_pre, Harm_reg_same_pre, Harm_stack_syn_pre, Harm_old_sp_pre,
+        Harm_pc_pre, Harm_valid_blk_pre, Harm_blk_perm_pre, arm_reg_valid_pre).
+        constructor; try assumption; try (split; assumption).
+      }
+
+      5:{
+        eapply jit_alu32_stack_list_callee_save; eauto.
+      }
+
+      4:{ eapply jit_alu32_stack_list_NoDup; eauto.
+      }
+
+      3:{
+        unfold rbpf_state_inv.
+        eapply jit_alu32_jit_blk_unchange_jitted_list in Hjit_save; eauto.
+        destruct Hjit_save as (Hjit_save & _).
+        assumption.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      2:{
+        eapply jit_alu32_jit_blk_memory_layout in Hjit_save; eauto.
+        destruct Hjit_save as (_ & Hjit_save).
+        eapply Hjit_save.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+
+      destruct Hone as (rs1_spilling & m1_spilling & Hrs_const_spilling & Hrs_12_spilling & Hstack_unchanged_spilling & Hstar_spilling & Harm_spilling).
+
+      eapply jit_load_simulation with (rs0 := rs1_spilling)(m0 := m1_spilling) (rbpf_st := rbpf_st0)
+        (st_blk := st_blk) (jit_blk := jit_blk) (sp_blk := sp_blk) (ra_blk := ra_blk) (old_sp := old_sp)
+        in Hjit_load as Hone; eauto.
+      5:{
+        intro r.
+        specialize (Hst r).
+        destruct Hst as (vi & Hload0 & Hload1).
+        exists vi.
+        split.
+        - eapply llvm_enable_alu32; eauto.
+        - rewrite <- Hload1.
+          eapply jit_alu32_jit_spilling_load_registers; eauto.
+
+          destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+          eapply Hmem.
+      }
+
+      4:{
+        eapply jit_alu32_jit_spilling_callee_save; eauto.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      3:{
+        unfold rbpf_state_inv.
+        eapply jit_alu32_jit_blk_unchange_jitted_list in Hjit_load; eauto.
+        destruct Hjit_load as (_ & Hjit_load & _).
+        assumption.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      2:{
+        eapply jit_alu32_jit_blk_memory_layout_1 in Hjit_load; eauto.
+        destruct Hjit_load as (Hjit_load & _).
+        eapply Hjit_load.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      destruct Hone as (rs1_load & Hrs_const_load & Hrs_12_load & Hstack_unchanged_load & Hstar_load & Harm_load).
+
+      eapply jit_core_simulation with (rs0 := rs1_load)(m0 := m1_spilling) (rbpf_st0 := rbpf_st0)
+        (st_blk := st_blk) (jit_blk := jit_blk) (sp_blk := sp_blk) (ra_blk := ra_blk) (old_sp := old_sp)
+        in Hjit_core as Hone; eauto.
+
+      5:{
+        eapply jit_alu32_jit_spilling_callee_save; eauto.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      4:{
+        unfold rbpf_state_inv.
+        eapply jit_alu32_jit_blk_unchange_jitted_list in Hjit_core; eauto.
+        destruct Hjit_core as (_ & _ & Hjit_core & _).
+        assumption.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      3:{
+        eapply jit_alu32_jit_blk_memory_layout_1 in Hjit_core; eauto.
+        destruct Hjit_core as (_ & Hjit_core & _).
+        eapply Hjit_core.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      2:{
+        apply list_subset_refl.
+      }
+
+      destruct Hone as (rs1_core & Hstar_core & Hstack_unchanged_core & Hrs_12_core & Harm_core).
+
+      eapply jit_store_simulation with (rs0 := rs1_core)(m0 := m1_spilling) (rbpf_st := rbpf_st1) (rs_init := rs1_pre)
+        (st_blk := st_blk) (jit_blk := jit_blk) (sp_blk := sp_blk) (ra_blk := ra_blk) (old_sp := old_sp)
+        (ls := (jit_alu32_stack_list l_load l_store st_pre))
+        in Hjit_store as Hone; eauto.
+
+      5:{
+        destruct Harm_core as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
+
+        constructor; try assumption; try (split; assumption).
+        destruct Harm_reg_syn as (Harm_reg_syn & Hnodup).
+        split.
+        - unfold regs_agree in *.
+          intros r Hin.
+          eapply Harm_reg_syn; eauto.
+          eapply jit_alu32_load_store_subst; eauto.
+        - eapply list_subst_nodup; eauto.
+          eapply jit_alu32_load_store_subst; eauto.
+        - unfold regs_unchanged in *.
+          intros r HT.
+          eapply jit_alu32_store_load_subst in Hload_list as Heq1; eauto.
+      }
+
+      4:{
+        eapply jit_alu32_jit_spilling_callee_save; eauto.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      3:{
+        unfold rbpf_state_inv.
+        eapply jit_alu32_jit_blk_unchange_jitted_list in Hjit_store; eauto.
+        destruct Hjit_store as (_ & _ & _ & Hjit_store & _).
+        assumption.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      2:{
+        eapply jit_alu32_jit_blk_memory_layout_1 in Hjit_core; eauto.
+        destruct Hjit_core as (_ & _ & Hjit_core).
+        eapply Hjit_core.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+
+      destruct Hone as (rs1_store & m_store & Hrs_const_store & Hrs_12_store & Hstack_unchanged_store & Hstar_store & Harm_store).
+
+      eapply jit_reloading_simulation with (rs0 := rs1_store) (m0 := m_store) (rbpf_st := rbpf_st1) (rs_init := rs1_pre)
+        (st_blk := st_blk) (jit_blk := jit_blk) (sp_blk := sp_blk) (ra_blk := ra_blk) (old_sp := old_sp)
+        in Hjit_reset as Hone; eauto.
+
+      6:{
+        unfold callee_save_used_sync.
+        intros r HF; inversion HF.
+      }
+
+      5:{
+        unfold rbpf_state_inv.
+        eapply jit_alu32_jit_blk_unchange_jitted_list in Hjit_reset; eauto.
+        destruct Hjit_reset as (_ & _ & _ & _ & Hjit_reset & _).
+        assumption.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      4:{
+        eapply jit_alu32_jit_blk_memory_layout_2 in Hjit_reset; eauto.
+        destruct Hjit_reset as (Hjit_reset & _).
+        eapply Hjit_reset.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      3:{
+        eapply jit_alu32_stack_list_callee_save; eauto.
+      }
+
+      2:{
+        eapply jit_alu32_stack_list_NoDup; eauto.
+      }
+
+
+      destruct Hone as (rs1_reloading & Hrs_const_reloading & Hrs_12_reloading & Hcallee & Hstar_reloading & Harm_reloading).
+
+      eapply jit_post_simulation with (rs0 := rs1_reloading) (m0 := m_store) (rbpf_st := rbpf_st1)
+        (st_blk := st_blk) (jit_blk := jit_blk) (sp_blk := sp_blk) (ra_blk := ra_blk) (old_sp := old_sp)
+        in Hjit as Hone; eauto.
+
+      4:{
+        destruct Harm_reloading as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+              Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
+
+        constructor; try assumption; try (split; assumption).
+        destruct Harm_stack_syn as (Harm_stack_syn & Hnodup).
+        split.
+        - unfold arm_synch_stack.
+          intros r HF; inversion HF.
+        - apply NoDup_nil.
+      }
+
+      3:{
+        unfold rbpf_state_inv.
+        eapply jit_alu32_jit_blk_unchange_jitted_list in Hjit; eauto.
+        destruct Hjit as (_ & _ & _ & _ & _ & Hjit & _).
+        assumption.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      2:{
+        eapply jit_alu32_jit_blk_memory_layout_2 in Hjit; eauto.
+        destruct Hjit as (_ & Hjit).
+        eapply Hjit.
+
+        destruct Hinit_state as (_ & _ & _ & _ & _ & _ & Hmem).
+        eapply Hmem.
+      }
+
+      destruct Hone as (rs1_post & Hrs_const_post & Hrs_12_post & Hrs_pc_post & Hrs_13_post & Hstar_post & Harm_post).
+
+      exists rs1_post, m_store.
+      split.
+      - clear - Hstar_pre Hstar_spilling Hstar_load Hstar_core Hstar_store Hstar_reloading Hstar_post.
+
+        eapply star_trans with (s3 := (State rs1_spilling m1_spilling)) in Hstar_pre; eauto.
+
+        eapply star_trans with (s3 := (State rs1_load m1_spilling)) in Hstar_pre; eauto.
+
+        eapply star_trans with (s3 := (State rs1_core m1_spilling)) in Hstar_pre; eauto.
+
+        eapply star_trans with (s3 := (State rs1_store m_store)) in Hstar_pre; eauto.
+
+        eapply star_trans with (s3 := (State rs1_reloading m_store)) in Hstar_pre; eauto.
+
+        eapply star_trans with (s3 := (State rs1_post m_store)) in Hstar_pre; eauto.
+      - destruct Harm_store as (Hra_blk, Harm_reg_syn, Harm_reg_same, Harm_stack_syn, (Hsp_blk & Harm_old_sp),
+          Harm_pc, Harm_valid_blk, (Hst_blk_perm & Hsp_blk_perm), Harm_reg_valid).
+        clear - Harm_reg_same.
+        unfold regs_unchanged in *.
+        intro r.
+        eapply Harm_reg_same; eauto.
+    Qed.
+  End JITCorrectness.
 
 End JITProofWhole.
